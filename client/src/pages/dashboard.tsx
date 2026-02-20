@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useState, useEffect, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { motion } from "framer-motion";
 import {
@@ -8,9 +8,9 @@ import {
   GitCommit,
   Loader2,
   Orbit,
-  RefreshCw,
-  Settings,
   Search,
+  Settings,
+  Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,7 +20,6 @@ import {
   CardTitle,
   CardDescription,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -34,47 +33,37 @@ import {
 import { GravityRing } from "@/components/gravity-ring";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { db } from "@/lib/db";
 import type { Repository, Settings as SettingsType } from "@shared/schema";
 
 export default function Dashboard() {
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [repoInput, setRepoInput] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [repos, setRepos] = useState<Repository[]>([]);
+  const [reposLoading, setReposLoading] = useState(true);
   const { toast } = useToast();
-
-  const { data: repositories, isLoading: reposLoading } = useQuery<Repository[]>({
-    queryKey: ["/api/repositories"],
-  });
 
   const { data: settings, isLoading: settingsLoading } = useQuery<SettingsType>({
     queryKey: ["/api/settings"],
   });
 
-  const addRepoMutation = useMutation({
-    mutationFn: async (fullName: string) => {
-      const [owner, name] = fullName.split("/");
-      const res = await apiRequest("POST", "/api/repositories", {
-        owner,
-        name,
-        fullName,
-      });
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/repositories"] });
-      setAddDialogOpen(false);
-      setRepoInput("");
-      toast({ title: "Repository added successfully" });
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to add repository",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
+  const loadRepos = useCallback(async () => {
+    try {
+      const repositories = await db.getRepositories();
+      setRepos(repositories);
+    } catch (error) {
+      console.error("Failed to load repositories:", error);
+    } finally {
+      setReposLoading(false);
+    }
+  }, []);
 
-  const handleAddRepo = () => {
+  useEffect(() => {
+    loadRepos();
+  }, [loadRepos]);
+
+  const handleAddRepo = async () => {
     if (!repoInput.includes("/")) {
       toast({
         title: "Invalid format",
@@ -83,7 +72,45 @@ export default function Dashboard() {
       });
       return;
     }
-    addRepoMutation.mutate(repoInput);
+    setAdding(true);
+    try {
+      const [owner, name] = repoInput.split("/");
+      const res = await apiRequest("POST", "/api/github/repo", { owner, name });
+      const repoData = await res.json();
+      await db.createRepository({
+        owner: repoData.owner,
+        name: repoData.name,
+        fullName: repoData.fullName,
+        description: repoData.description,
+        defaultBranch: repoData.defaultBranch,
+      });
+      await loadRepos();
+      setAddDialogOpen(false);
+      setRepoInput("");
+      toast({ title: "Repository added successfully" });
+    } catch (error: any) {
+      toast({
+        title: "Failed to add repository",
+        description: error.message,
+        variant: "destructive",
+      });
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleDeleteRepo = async (id: string) => {
+    try {
+      await db.deleteRepository(id);
+      await loadRepos();
+      toast({ title: "Repository removed" });
+    } catch (error: any) {
+      toast({
+        title: "Failed to remove repository",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
   };
 
   const hasSettings = settings?.githubPat;
@@ -138,8 +165,7 @@ export default function Dashboard() {
               <div className="space-y-1">
                 <CardTitle className="text-lg">Configure GitHub Access</CardTitle>
                 <CardDescription>
-                  Set up your GitHub Personal Access Token to start monitoring
-                  repositories.
+                  Set up your GITHUB_PAT environment variable to start monitoring repositories.
                 </CardDescription>
               </div>
               <Link href="/settings">
@@ -153,9 +179,9 @@ export default function Dashboard() {
         </motion.div>
       )}
 
-      {repositories && repositories.length > 0 ? (
+      {repos.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {repositories.map((repo, index) => (
+          {repos.map((repo, index) => (
             <motion.div
               key={repo.id}
               initial={{ opacity: 0, y: 20 }}
@@ -214,10 +240,14 @@ export default function Dashboard() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      data-testid={`button-analyze-repo-${repo.id}`}
+                      className="text-destructive hover:text-destructive"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteRepo(repo.id);
+                      }}
+                      data-testid={`button-delete-repo-${repo.id}`}
                     >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      Analyze
+                      <Trash2 className="w-3.5 h-3.5" />
                     </Button>
                   </div>
                 </CardContent>
@@ -282,10 +312,10 @@ export default function Dashboard() {
             </Button>
             <Button
               onClick={handleAddRepo}
-              disabled={addRepoMutation.isPending || !repoInput}
+              disabled={adding || !repoInput}
               data-testid="button-submit-add-repo"
             >
-              {addRepoMutation.isPending && (
+              {adding && (
                 <Loader2 className="w-4 h-4 animate-spin" />
               )}
               Add Repository

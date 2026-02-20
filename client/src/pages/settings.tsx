@@ -1,15 +1,13 @@
-import { useState, useEffect } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
-  Eye,
-  EyeOff,
   Check,
   X,
   Loader2,
   GitBranch,
   Activity,
+  Shield,
+  FileCode,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,52 +17,19 @@ import {
   CardTitle,
   CardDescription,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-} from "@/components/ui/form";
+import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
-import { insertSettingsSchema } from "@shared/schema";
+import { apiRequest } from "@/lib/queryClient";
 import type { Settings } from "@shared/schema";
-import { z } from "zod";
-
-const settingsFormSchema = insertSettingsSchema.extend({
-  githubPat: z.string().optional().nullable(),
-  aiProvider: z.string().optional().nullable(),
-  aiApiKey: z.string().optional().nullable(),
-  aiModel: z.string().optional().nullable(),
-});
-
-type SettingsFormValues = z.infer<typeof settingsFormSchema>;
-
-const modelDefaults: Record<string, string> = {
-  openai: "gpt-4o",
-  anthropic: "claude-sonnet-4-20250514",
-  google: "gemini-2.0-flash",
-};
 
 export default function SettingsPage() {
   const { toast } = useToast();
-  const [showPat, setShowPat] = useState(false);
-  const [showAiKey, setShowAiKey] = useState(false);
   const [githubTestStatus, setGithubTestStatus] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
+  const [githubUsername, setGithubUsername] = useState<string | null>(null);
   const [aiTestStatus, setAiTestStatus] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
@@ -73,84 +38,21 @@ export default function SettingsPage() {
     queryKey: ["/api/settings"],
   });
 
-  const form = useForm<SettingsFormValues>({
-    resolver: zodResolver(settingsFormSchema),
-    defaultValues: {
-      githubPat: "",
-      aiProvider: "",
-      aiApiKey: "",
-      aiModel: "",
-    },
-  });
-
-  useEffect(() => {
-    if (settings) {
-      form.reset({
-        githubPat: settings.githubPat ? "••••••••" : "",
-        aiProvider: settings.aiProvider || "",
-        aiApiKey: settings.aiApiKey ? "••••••••" : "",
-        aiModel: settings.aiModel || "",
-      });
-    }
-  }, [settings, form]);
-
-  const selectedProvider = form.watch("aiProvider");
-
-  useEffect(() => {
-    if (selectedProvider && modelDefaults[selectedProvider]) {
-      const currentModel = form.getValues("aiModel");
-      if (
-        !currentModel ||
-        Object.values(modelDefaults).includes(currentModel)
-      ) {
-        form.setValue("aiModel", modelDefaults[selectedProvider]);
-      }
-    }
-  }, [selectedProvider, form]);
-
-  const saveGithubMutation = useMutation({
-    mutationFn: async (data: Partial<SettingsFormValues>) => {
-      const res = await apiRequest("PUT", "/api/settings", data);
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
-      toast({ title: "GitHub settings saved" });
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to save settings",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
-  const saveAiMutation = useMutation({
-    mutationFn: async (data: Partial<SettingsFormValues>) => {
-      const res = await apiRequest("PUT", "/api/settings", data);
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
-      toast({ title: "AI settings saved" });
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Failed to save settings",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
   const handleTestGithub = async () => {
     setGithubTestStatus("loading");
     try {
-      await apiRequest("GET", "/api/settings/test-github");
+      const res = await apiRequest("GET", "/api/settings/test-github");
+      const data = await res.json();
+      setGithubUsername(data.username);
       setGithubTestStatus("success");
+      toast({ title: `Connected as ${data.username}` });
     } catch {
       setGithubTestStatus("error");
+      toast({
+        title: "GitHub connection failed",
+        description: "Check your GITHUB_PAT in the .env file",
+        variant: "destructive",
+      });
     }
   };
 
@@ -159,24 +61,15 @@ export default function SettingsPage() {
     try {
       await apiRequest("GET", "/api/settings/test-ai");
       setAiTestStatus("success");
+      toast({ title: "AI provider connection successful" });
     } catch {
       setAiTestStatus("error");
+      toast({
+        title: "AI connection failed",
+        description: "Check your AI_API_KEY and AI_PROVIDER in the .env file",
+        variant: "destructive",
+      });
     }
-  };
-
-  const handleSaveGithub = () => {
-    const pat = form.getValues("githubPat");
-    if (pat === "••••••••") return;
-    saveGithubMutation.mutate({ githubPat: pat });
-  };
-
-  const handleSaveAi = () => {
-    const aiApiKey = form.getValues("aiApiKey");
-    saveAiMutation.mutate({
-      aiProvider: form.getValues("aiProvider"),
-      aiApiKey: aiApiKey === "••••••••" ? undefined : aiApiKey,
-      aiModel: form.getValues("aiModel"),
-    });
   };
 
   if (isLoading) {
@@ -196,248 +89,173 @@ export default function SettingsPage() {
           Settings
         </h1>
         <p className="text-sm text-muted-foreground">
-          Configure your connections and API access
+          Environment configuration status
         </p>
       </div>
 
-      <Form {...form}>
-        <form onSubmit={(e) => e.preventDefault()} className="space-y-6">
-          <Card data-testid="card-github-settings">
-            <CardHeader className="flex flex-row items-center gap-3 flex-wrap">
-              <div className="flex items-center justify-center w-9 h-9 rounded-md bg-muted">
-                <GitBranch className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <div className="space-y-1">
-                <CardTitle className="text-lg">GitHub Configuration</CardTitle>
-                <CardDescription>
-                  Connect your GitHub account with a Personal Access Token
-                </CardDescription>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <FormField
-                control={form.control}
-                name="githubPat"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Personal Access Token</FormLabel>
-                    <FormControl>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <div className="relative flex-1 min-w-[200px]">
-                          <Input
-                            type={showPat ? "text" : "password"}
-                            placeholder="ghp_xxxxxxxxxxxx"
-                            {...field}
-                            value={field.value || ""}
-                            data-testid="input-github-pat"
-                          />
-                          <Button
-                            type="button"
-                            size="icon"
-                            variant="ghost"
-                            className="absolute right-0 top-0"
-                            onClick={() => setShowPat(!showPat)}
-                            data-testid="button-toggle-pat-visibility"
-                          >
-                            {showPat ? (
-                              <EyeOff className="w-4 h-4" />
-                            ) : (
-                              <Eye className="w-4 h-4" />
-                            )}
-                          </Button>
-                        </div>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+      <Card data-testid="card-env-instructions">
+        <CardHeader className="flex flex-row items-center gap-3 flex-wrap">
+          <div className="flex items-center justify-center w-9 h-9 rounded-md bg-muted">
+            <FileCode className="w-4 h-4 text-muted-foreground" />
+          </div>
+          <div className="space-y-1">
+            <CardTitle className="text-lg">Configuration</CardTitle>
+            <CardDescription>
+              API keys are configured via environment variables in your <code className="text-xs bg-muted px-1 py-0.5 rounded">.env</code> file
+            </CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="bg-muted/50 rounded-lg p-4 font-mono text-sm space-y-1">
+            <p className="text-muted-foreground"># .env</p>
+            <p>GITHUB_PAT=ghp_your_token_here</p>
+            <p>AI_PROVIDER=openai</p>
+            <p>AI_API_KEY=sk-your_key_here</p>
+            <p>AI_MODEL=gpt-4o</p>
+          </div>
+        </CardContent>
+      </Card>
 
-              <Separator />
+      <Card data-testid="card-github-settings">
+        <CardHeader className="flex flex-row items-center gap-3 flex-wrap">
+          <div className="flex items-center justify-center w-9 h-9 rounded-md bg-muted">
+            <GitBranch className="w-4 h-4 text-muted-foreground" />
+          </div>
+          <div className="space-y-1 flex-1">
+            <CardTitle className="text-lg">GitHub</CardTitle>
+            <CardDescription>
+              Personal Access Token for repository access
+            </CardDescription>
+          </div>
+          {settings?.githubPat ? (
+            <Badge variant="default" className="bg-green-600" data-testid="badge-github-status">
+              <Shield className="w-3 h-3 mr-1" />
+              Configured
+            </Badge>
+          ) : (
+            <Badge variant="destructive" data-testid="badge-github-status">
+              Not Configured
+            </Badge>
+          )}
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {settings?.githubPat && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <span>Token:</span>
+              <code className="bg-muted px-2 py-0.5 rounded" data-testid="text-github-pat">
+                {settings.githubPat}
+              </code>
+            </div>
+          )}
 
-              <div className="flex items-center gap-3 flex-wrap">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleTestGithub}
-                  disabled={githubTestStatus === "loading"}
-                  data-testid="button-test-github"
-                >
-                  {githubTestStatus === "loading" ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : githubTestStatus === "success" ? (
-                    <Check className="w-4 h-4 text-green-500" />
-                  ) : githubTestStatus === "error" ? (
-                    <X className="w-4 h-4 text-red-500" />
-                  ) : null}
-                  Test Connection
-                </Button>
-                <Button
-                  type="button"
-                  onClick={handleSaveGithub}
-                  disabled={saveGithubMutation.isPending}
-                  data-testid="button-save-github"
-                >
-                  {saveGithubMutation.isPending && (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  )}
-                  Save
-                </Button>
-                {githubTestStatus === "success" && (
-                  <span className="text-sm text-green-500">
-                    Connection successful
-                  </span>
-                )}
-                {githubTestStatus === "error" && (
-                  <span className="text-sm text-red-500">
-                    Connection failed
-                  </span>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+          {githubUsername && githubTestStatus === "success" && (
+            <div className="flex items-center gap-2 text-sm text-green-500">
+              <Check className="w-4 h-4" />
+              Authenticated as <strong>{githubUsername}</strong>
+            </div>
+          )}
 
-          <Card data-testid="card-ai-settings">
-            <CardHeader className="flex flex-row items-center gap-3 flex-wrap">
-              <div className="flex items-center justify-center w-9 h-9 rounded-md bg-muted">
-                <Activity className="w-4 h-4 text-muted-foreground" />
-              </div>
-              <div className="space-y-1">
-                <CardTitle className="text-lg">
-                  AI Provider Configuration
-                </CardTitle>
-                <CardDescription>
-                  Set up your AI provider for architecture analysis
-                </CardDescription>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <FormField
-                control={form.control}
-                name="aiProvider"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Provider</FormLabel>
-                    <Select
-                      onValueChange={field.onChange}
-                      value={field.value || ""}
-                    >
-                      <FormControl>
-                        <SelectTrigger data-testid="select-ai-provider">
-                          <SelectValue placeholder="Select a provider" />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value="openai">OpenAI</SelectItem>
-                        <SelectItem value="anthropic">Anthropic</SelectItem>
-                        <SelectItem value="google">Google</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+          <Separator />
 
-              <FormField
-                control={form.control}
-                name="aiApiKey"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>API Key</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type={showAiKey ? "text" : "password"}
-                          placeholder="Enter your API key"
-                          {...field}
-                          value={field.value || ""}
-                          data-testid="input-ai-api-key"
-                        />
-                        <Button
-                          type="button"
-                          size="icon"
-                          variant="ghost"
-                          className="absolute right-0 top-0"
-                          onClick={() => setShowAiKey(!showAiKey)}
-                          data-testid="button-toggle-ai-key-visibility"
-                        >
-                          {showAiKey ? (
-                            <EyeOff className="w-4 h-4" />
-                          ) : (
-                            <Eye className="w-4 h-4" />
-                          )}
-                        </Button>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+          <div className="flex items-center gap-3 flex-wrap">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleTestGithub}
+              disabled={githubTestStatus === "loading" || !settings?.githubPat}
+              data-testid="button-test-github"
+            >
+              {githubTestStatus === "loading" ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : githubTestStatus === "success" ? (
+                <Check className="w-4 h-4 text-green-500" />
+              ) : githubTestStatus === "error" ? (
+                <X className="w-4 h-4 text-red-500" />
+              ) : null}
+              Test Connection
+            </Button>
+            {githubTestStatus === "success" && (
+              <span className="text-sm text-green-500">Connection successful</span>
+            )}
+            {githubTestStatus === "error" && (
+              <span className="text-sm text-red-500">Connection failed — check GITHUB_PAT</span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
-              <FormField
-                control={form.control}
-                name="aiModel"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Model</FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="Model name"
-                        {...field}
-                        value={field.value || ""}
-                        data-testid="input-ai-model"
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+      <Card data-testid="card-ai-settings">
+        <CardHeader className="flex flex-row items-center gap-3 flex-wrap">
+          <div className="flex items-center justify-center w-9 h-9 rounded-md bg-muted">
+            <Activity className="w-4 h-4 text-muted-foreground" />
+          </div>
+          <div className="space-y-1 flex-1">
+            <CardTitle className="text-lg">AI Provider</CardTitle>
+            <CardDescription>
+              AI model for architecture analysis
+            </CardDescription>
+          </div>
+          {settings?.aiApiKey ? (
+            <Badge variant="default" className="bg-green-600" data-testid="badge-ai-status">
+              <Shield className="w-3 h-3 mr-1" />
+              Configured
+            </Badge>
+          ) : (
+            <Badge variant="destructive" data-testid="badge-ai-status">
+              Not Configured
+            </Badge>
+          )}
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+            <div>
+              <p className="text-muted-foreground mb-1">Provider</p>
+              <p className="font-medium capitalize" data-testid="text-ai-provider">
+                {settings?.aiProvider || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-muted-foreground mb-1">Model</p>
+              <p className="font-medium" data-testid="text-ai-model">
+                {settings?.aiModel || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-muted-foreground mb-1">API Key</p>
+              <code className="bg-muted px-2 py-0.5 rounded text-xs" data-testid="text-ai-key">
+                {settings?.aiApiKey || "—"}
+              </code>
+            </div>
+          </div>
 
-              <Separator />
+          <Separator />
 
-              <div className="flex items-center gap-3 flex-wrap">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleTestAi}
-                  disabled={aiTestStatus === "loading"}
-                  data-testid="button-test-ai"
-                >
-                  {aiTestStatus === "loading" ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : aiTestStatus === "success" ? (
-                    <Check className="w-4 h-4 text-green-500" />
-                  ) : aiTestStatus === "error" ? (
-                    <X className="w-4 h-4 text-red-500" />
-                  ) : null}
-                  Test Connection
-                </Button>
-                <Button
-                  type="button"
-                  onClick={handleSaveAi}
-                  disabled={saveAiMutation.isPending}
-                  data-testid="button-save-ai"
-                >
-                  {saveAiMutation.isPending && (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  )}
-                  Save
-                </Button>
-                {aiTestStatus === "success" && (
-                  <span className="text-sm text-green-500">
-                    Connection successful
-                  </span>
-                )}
-                {aiTestStatus === "error" && (
-                  <span className="text-sm text-red-500">
-                    Connection failed
-                  </span>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </form>
-      </Form>
+          <div className="flex items-center gap-3 flex-wrap">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleTestAi}
+              disabled={aiTestStatus === "loading" || !settings?.aiApiKey}
+              data-testid="button-test-ai"
+            >
+              {aiTestStatus === "loading" ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : aiTestStatus === "success" ? (
+                <Check className="w-4 h-4 text-green-500" />
+              ) : aiTestStatus === "error" ? (
+                <X className="w-4 h-4 text-red-500" />
+              ) : null}
+              Test Connection
+            </Button>
+            {aiTestStatus === "success" && (
+              <span className="text-sm text-green-500">Connection successful</span>
+            )}
+            {aiTestStatus === "error" && (
+              <span className="text-sm text-red-500">Connection failed — check AI_API_KEY</span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

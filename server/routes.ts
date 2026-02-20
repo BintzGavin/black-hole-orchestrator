@@ -1,11 +1,18 @@
 import type { Express } from "express";
-import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import type { Server } from "http";
 import { Octokit } from "@octokit/rest";
 import { generateText } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
+
+function safeErrorMessage(error: any, fallback: string): string {
+  const msg = error?.message || "";
+  if (msg.includes("environment variable")) return msg;
+  if (msg.includes("owner and name")) return msg;
+  console.error("Proxy error:", error);
+  return fallback;
+}
 
 function maskSecret(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -13,12 +20,21 @@ function maskSecret(value: string | null | undefined): string | null {
   return "****" + value.slice(-4);
 }
 
-async function getOctokit(): Promise<Octokit> {
-  const settings = await storage.getSettings();
-  if (!settings?.githubPat) {
-    throw new Error("GitHub PAT is not configured");
+function getEnvSettings() {
+  return {
+    githubPat: process.env.GITHUB_PAT || null,
+    aiProvider: process.env.AI_PROVIDER || "openai",
+    aiApiKey: process.env.AI_API_KEY || null,
+    aiModel: process.env.AI_MODEL || "gpt-4",
+  };
+}
+
+function getOctokit(): Octokit {
+  const { githubPat } = getEnvSettings();
+  if (!githubPat) {
+    throw new Error("GITHUB_PAT environment variable is not set");
   }
-  return new Octokit({ auth: settings.githubPat });
+  return new Octokit({ auth: githubPat });
 }
 
 function getAIModel(provider: string, apiKey: string, model: string) {
@@ -45,140 +61,79 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
-  app.get("/api/settings", async (_req, res) => {
-    try {
-      const settings = await storage.getSettings();
-      if (!settings) {
-        return res.json(null);
-      }
-      res.json({
-        ...settings,
-        githubPat: maskSecret(settings.githubPat),
-        aiApiKey: maskSecret(settings.aiApiKey),
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.put("/api/settings", async (req, res) => {
-    try {
-      const { githubPat, aiProvider, aiApiKey, aiModel } = req.body;
-      const data: any = {};
-      if (githubPat !== undefined) data.githubPat = githubPat;
-      if (aiProvider !== undefined) data.aiProvider = aiProvider;
-      if (aiApiKey !== undefined) data.aiApiKey = aiApiKey;
-      if (aiModel !== undefined) data.aiModel = aiModel;
-      const settings = await storage.upsertSettings(data);
-      res.json({
-        ...settings,
-        githubPat: maskSecret(settings.githubPat),
-        aiApiKey: maskSecret(settings.aiApiKey),
-      });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
+  app.get("/api/settings", (_req, res) => {
+    const env = getEnvSettings();
+    res.json({
+      githubPat: maskSecret(env.githubPat),
+      aiProvider: env.aiProvider,
+      aiApiKey: maskSecret(env.aiApiKey),
+      aiModel: env.aiModel,
+      configured: !!(env.githubPat && env.aiApiKey),
+    });
   });
 
   app.get("/api/settings/test-github", async (_req, res) => {
     try {
-      const octokit = await getOctokit();
+      const octokit = getOctokit();
       const { data } = await octokit.rest.users.getAuthenticated();
       res.json({ success: true, username: data.login });
     } catch (error: any) {
-      res.status(400).json({ success: false, message: error.message });
+      res.status(400).json({ success: false, message: safeErrorMessage(error, "GitHub connection failed. Check your GITHUB_PAT.") });
     }
   });
 
   app.get("/api/settings/test-ai", async (_req, res) => {
     try {
-      const settings = await storage.getSettings();
-      if (!settings?.aiProvider || !settings?.aiApiKey || !settings?.aiModel) {
-        throw new Error("AI provider settings are not configured");
+      const env = getEnvSettings();
+      if (!env.aiProvider || !env.aiApiKey || !env.aiModel) {
+        throw new Error("AI_PROVIDER, AI_API_KEY, and AI_MODEL environment variables must be set");
       }
-      const model = getAIModel(settings.aiProvider, settings.aiApiKey, settings.aiModel);
+      const model = getAIModel(env.aiProvider, env.aiApiKey, env.aiModel);
       const { text } = await generateText({
         model,
         prompt: "Hello, respond with OK",
       });
       res.json({ success: true, response: text });
     } catch (error: any) {
-      res.status(400).json({ success: false, message: error.message });
+      res.status(400).json({ success: false, message: safeErrorMessage(error, "AI connection failed. Check your AI_API_KEY and AI_PROVIDER.") });
     }
   });
 
-  app.get("/api/repositories", async (_req, res) => {
-    try {
-      const repos = await storage.getRepositories();
-      res.json(repos);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/repositories", async (req, res) => {
+  app.post("/api/github/repo", async (req, res) => {
     try {
       const { owner, name } = req.body;
       if (!owner || !name) {
         return res.status(400).json({ message: "owner and name are required" });
       }
-      const octokit = await getOctokit();
+      const octokit = getOctokit();
       const { data } = await octokit.rest.repos.get({ owner, repo: name });
-      const repo = await storage.createRepository({
+      res.json({
         owner: data.owner.login,
         name: data.name,
         fullName: data.full_name,
         description: data.description || null,
         defaultBranch: data.default_branch,
       });
-      res.status(201).json(repo);
     } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      res.status(500).json({ message: safeErrorMessage(error, "Failed to fetch repository from GitHub.") });
     }
   });
 
-  app.get("/api/repositories/:id", async (req, res) => {
+  app.post("/api/github/scan", async (req, res) => {
     try {
-      const repo = await storage.getRepository(req.params.id);
-      if (!repo) {
-        return res.status(404).json({ message: "Repository not found" });
+      const { owner, name, defaultBranch } = req.body;
+      if (!owner || !name) {
+        return res.status(400).json({ message: "owner and name are required" });
       }
-      res.json(repo);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.delete("/api/repositories/:id", async (req, res) => {
-    try {
-      const id = req.params.id;
-      const repo = await storage.getRepository(id);
-      if (!repo) {
-        return res.status(404).json({ message: "Repository not found" });
-      }
-      await storage.deleteAgentRolesByRepository(id);
-      await storage.deleteRepository(id);
-      res.json({ message: "Repository deleted" });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.post("/api/repositories/:id/scan", async (req, res) => {
-    try {
-      const id = req.params.id;
-      const repo = await storage.getRepository(id);
-      if (!repo) {
-        return res.status(404).json({ message: "Repository not found" });
-      }
-      const octokit = await getOctokit();
+      const octokit = getOctokit();
+      const branch = defaultBranch || "main";
 
       let tree: any[] = [];
       try {
         const { data } = await octokit.rest.git.getTree({
-          owner: repo.owner,
-          repo: repo.name,
-          tree_sha: repo.defaultBranch || "main",
+          owner,
+          repo: name,
+          tree_sha: branch,
           recursive: "1",
         });
         tree = data.tree;
@@ -187,7 +142,6 @@ export async function registerRoutes(
       }
 
       const rolePaths: { path: string; type: string }[] = [];
-
       for (const item of tree) {
         if (item.type !== "blob") continue;
         const p = item.path as string;
@@ -204,17 +158,15 @@ export async function registerRoutes(
         }
       }
 
-      await storage.deleteAgentRolesByRepository(id);
-
       const roles = [];
       for (const rp of rolePaths) {
         let content = "";
         try {
           const { data } = await octokit.rest.repos.getContent({
-            owner: repo.owner,
-            repo: repo.name,
+            owner,
+            repo: name,
             path: rp.path,
-            ref: repo.defaultBranch || "main",
+            ref: branch,
           });
           if ("content" in data && data.content) {
             content = Buffer.from(data.content, "base64").toString("utf-8");
@@ -237,59 +189,57 @@ export async function registerRoutes(
           }
         }
 
-        const role = await storage.createAgentRole({
-          repositoryId: id,
+        roles.push({
           name: roleName,
           description,
           promptFile: rp.path,
           boundaries: boundaries.length > 0 ? boundaries : null,
           status: "active",
         });
-        roles.push(role);
       }
 
       res.json(roles);
     } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      res.status(500).json({ message: safeErrorMessage(error, "Failed to scan repository.") });
     }
   });
 
-  app.post("/api/repositories/:id/analyze", async (req, res) => {
+  app.post("/api/github/analyze", async (req, res) => {
     try {
-      const id = req.params.id;
-      const repo = await storage.getRepository(id);
-      if (!repo) {
-        return res.status(404).json({ message: "Repository not found" });
+      const { owner, name } = req.body;
+      if (!owner || !name) {
+        return res.status(400).json({ message: "owner and name are required" });
       }
 
-      const settings = await storage.getSettings();
-      if (!settings?.githubPat) {
-        return res.status(400).json({ message: "GitHub PAT is not configured" });
+      const env = getEnvSettings();
+      if (!env.githubPat) {
+        return res.status(400).json({ message: "GITHUB_PAT environment variable is not set" });
       }
-      if (!settings?.aiProvider || !settings?.aiApiKey || !settings?.aiModel) {
-        return res.status(400).json({ message: "AI provider settings are not configured" });
+      if (!env.aiProvider || !env.aiApiKey || !env.aiModel) {
+        return res.status(400).json({ message: "AI_PROVIDER, AI_API_KEY, and AI_MODEL environment variables must be set" });
       }
 
-      const octokit = new Octokit({ auth: settings.githubPat });
+      const octokit = new Octokit({ auth: env.githubPat });
 
       const { data: commits } = await octokit.rest.repos.listCommits({
-        owner: repo.owner,
-        repo: repo.name,
+        owner,
+        repo: name,
         per_page: 100,
       });
 
       const { data: prs } = await octokit.rest.pulls.list({
-        owner: repo.owner,
-        repo: repo.name,
+        owner,
+        repo: name,
         state: "all",
         per_page: 50,
         sort: "updated",
         direction: "desc",
       });
 
+      const activityEvents = [];
+
       for (const commit of commits) {
-        await storage.createActivityEvent({
-          repositoryId: id,
+        activityEvents.push({
           type: "commit",
           title: commit.commit.message.split("\n")[0],
           description: commit.commit.message,
@@ -302,23 +252,22 @@ export async function registerRoutes(
       }
 
       for (const pr of prs) {
-        await storage.createActivityEvent({
-          repositoryId: id,
+        activityEvents.push({
           type: "pull_request",
           title: pr.title,
           description: pr.body || "",
           prNumber: pr.number,
           author: pr.user?.login || "unknown",
-          additions: pr.additions || 0,
-          deletions: pr.deletions || 0,
-          filesChanged: pr.changed_files || 0,
+          additions: (pr as any).additions || 0,
+          deletions: (pr as any).deletions || 0,
+          filesChanged: (pr as any).changed_files || 0,
         });
       }
 
       const commitSummary = commits.slice(0, 20).map((c) => `- ${c.commit.message.split("\n")[0]} (by ${c.commit.author?.name || "unknown"})`).join("\n");
       const prSummary = prs.slice(0, 10).map((p) => `- PR #${p.number}: ${p.title} (${p.state}) by ${p.user?.login || "unknown"}`).join("\n");
 
-      const prompt = `Analyze the following git activity for the repository "${repo.fullName}" and provide:
+      const prompt = `Analyze the following git activity for the repository "${owner}/${name}" and provide:
 1. An overall "gravity score" from 0-100 (where 100 means the project has very strong development momentum and activity)
 2. A summary of recent accomplishments
 3. Detection of any weak gravity signals (areas where development has slowed or stopped)
@@ -339,7 +288,7 @@ SUMMARY: <your analysis summary in a single paragraph>
 WEAK_SIGNALS: <detected weak signals>
 RECOMMENDATIONS: <your recommendations>`;
 
-      const model = getAIModel(settings.aiProvider, settings.aiApiKey, settings.aiModel);
+      const model = getAIModel(env.aiProvider, env.aiApiKey, env.aiModel);
       const { text } = await generateText({ model, prompt });
 
       let gravityScore = 50;
@@ -354,53 +303,16 @@ RECOMMENDATIONS: <your recommendations>`;
         summary = summaryMatch[1].trim();
       }
 
-      const analysis = await storage.createAnalysisResult({
-        repositoryId: id,
-        type: "ai_analysis",
-        summary,
-        score: gravityScore,
-        details: { fullResponse: text, commitsAnalyzed: commits.length, prsAnalyzed: prs.length },
-      });
-
-      await storage.updateRepository(id, {
+      res.json({
         gravityScore,
-        lastAnalyzedAt: new Date(),
-        totalCommits: commits.length,
-        totalPrs: prs.length,
+        summary,
+        fullResponse: text,
+        commitsAnalyzed: commits.length,
+        prsAnalyzed: prs.length,
+        activityEvents,
       });
-
-      res.json(analysis);
     } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/repositories/:id/roles", async (req, res) => {
-    try {
-      const roles = await storage.getAgentRoles(req.params.id);
-      res.json(roles);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/repositories/:id/activity", async (req, res) => {
-    try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
-      const events = await storage.getActivityEvents(req.params.id, limit);
-      res.json(events);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.get("/api/repositories/:id/analysis", async (req, res) => {
-    try {
-      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
-      const results = await storage.getAnalysisResults(req.params.id, limit);
-      res.json(results);
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      res.status(500).json({ message: safeErrorMessage(error, "Analysis failed.") });
     }
   });
 

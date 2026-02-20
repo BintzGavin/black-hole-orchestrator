@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useState, useEffect, useCallback } from "react";
 import { Link, useParams } from "wouter";
 import { motion } from "framer-motion";
 import {
@@ -29,7 +28,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { GravityRing } from "@/components/gravity-ring";
 import { GravityVisualization } from "@/components/gravity-visualization";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
+import { db } from "@/lib/db";
 import type {
   Repository,
   AgentRole,
@@ -67,78 +67,108 @@ export default function RepositoryPage() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
   const [activityLimit, setActivityLimit] = useState(50);
+  const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
 
-  const { data: repo, isLoading: repoLoading } = useQuery<Repository>({
-    queryKey: ["/api/repositories", id],
-  });
+  const [repo, setRepo] = useState<Repository | undefined>();
+  const [roles, setRoles] = useState<AgentRole[]>([]);
+  const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [analyses, setAnalyses] = useState<AnalysisResult[]>([]);
 
-  const { data: roles, isLoading: rolesLoading } = useQuery<AgentRole[]>({
-    queryKey: ["/api/repositories", id, "roles"],
-  });
+  const loadData = useCallback(async () => {
+    if (!id) return;
+    try {
+      const [repoData, rolesData, eventsData, analysesData] = await Promise.all([
+        db.getRepository(id),
+        db.getAgentRoles(id),
+        db.getActivityEvents(id),
+        db.getAnalysisResults(id),
+      ]);
+      setRepo(repoData);
+      setRoles(rolesData);
+      setEvents(eventsData);
+      setAnalyses(analysesData);
+    } catch (error) {
+      console.error("Failed to load repository data:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
 
-  const { data: events, isLoading: eventsLoading } = useQuery<ActivityEvent[]>({
-    queryKey: ["/api/repositories", id, "activity"],
-  });
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
-  const { data: analyses, isLoading: analysesLoading } = useQuery<
-    AnalysisResult[]
-  >({
-    queryKey: ["/api/repositories", id, "analysis"],
-  });
-
-  const scanMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest(
-        "POST",
-        `/api/repositories/${id}/scan`
-      );
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["/api/repositories", id, "roles"],
+  const handleScan = async () => {
+    if (!repo) return;
+    setScanning(true);
+    try {
+      const res = await apiRequest("POST", "/api/github/scan", {
+        owner: repo.owner,
+        name: repo.name,
+        defaultBranch: repo.defaultBranch,
       });
-      toast({ title: "Agent scan started" });
-    },
-    onError: (error: Error) => {
+      const scannedRoles = await res.json();
+      await db.setAgentRoles(repo.id, scannedRoles);
+      await loadData();
+      toast({ title: "Agent scan complete" });
+    } catch (error: any) {
       toast({
         title: "Scan failed",
         description: error.message,
         variant: "destructive",
       });
-    },
-  });
+    } finally {
+      setScanning(false);
+    }
+  };
 
-  const analyzeMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest(
-        "POST",
-        `/api/repositories/${id}/analyze`
-      );
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["/api/repositories", id],
+  const handleAnalyze = async () => {
+    if (!repo) return;
+    setAnalyzing(true);
+    try {
+      const res = await apiRequest("POST", "/api/github/analyze", {
+        owner: repo.owner,
+        name: repo.name,
       });
-      queryClient.invalidateQueries({
-        queryKey: ["/api/repositories", id, "analysis"],
+      const result = await res.json();
+
+      await db.setActivityEvents(repo.id, result.activityEvents);
+
+      await db.createAnalysisResult({
+        repositoryId: repo.id,
+        type: "ai_analysis",
+        summary: result.summary,
+        score: result.gravityScore,
+        details: {
+          fullResponse: result.fullResponse,
+          commitsAnalyzed: result.commitsAnalyzed,
+          prsAnalyzed: result.prsAnalyzed,
+        },
       });
-      queryClient.invalidateQueries({
-        queryKey: ["/api/repositories", id, "activity"],
+
+      await db.updateRepository(repo.id, {
+        gravityScore: result.gravityScore,
+        lastAnalyzedAt: new Date().toISOString(),
+        totalCommits: result.commitsAnalyzed,
+        totalPrs: result.prsAnalyzed,
       });
-      toast({ title: "Analysis started" });
-    },
-    onError: (error: Error) => {
+
+      await loadData();
+      toast({ title: "Analysis complete" });
+    } catch (error: any) {
       toast({
         title: "Analysis failed",
         description: error.message,
         variant: "destructive",
       });
-    },
-  });
+    } finally {
+      setAnalyzing(false);
+    }
+  };
 
-  if (repoLoading) {
+  if (loading) {
     return (
       <div className="p-6 space-y-6">
         <Skeleton className="h-8 w-64" />
@@ -165,7 +195,7 @@ export default function RepositoryPage() {
     );
   }
 
-  const latestAnalysis = analyses?.[0];
+  const latestAnalysis = analyses[0];
 
   return (
     <div className="p-6 space-y-6" data-testid="page-repository">
@@ -195,11 +225,11 @@ export default function RepositoryPage() {
         <div className="flex items-center gap-2 flex-wrap">
           <Button
             variant="outline"
-            onClick={() => scanMutation.mutate()}
-            disabled={scanMutation.isPending}
+            onClick={handleScan}
+            disabled={scanning}
             data-testid="button-scan-agents"
           >
-            {scanMutation.isPending ? (
+            {scanning ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <Search className="w-4 h-4" />
@@ -207,11 +237,11 @@ export default function RepositoryPage() {
             Scan for Agents
           </Button>
           <Button
-            onClick={() => analyzeMutation.mutate()}
-            disabled={analyzeMutation.isPending}
+            onClick={handleAnalyze}
+            disabled={analyzing}
             data-testid="button-run-analysis"
           >
-            {analyzeMutation.isPending ? (
+            {analyzing ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <RefreshCw className="w-4 h-4" />
@@ -276,7 +306,7 @@ export default function RepositoryPage() {
                 <CardContent>
                   <GravityVisualization
                     repoName={repo.name}
-                    roles={roles ?? []}
+                    roles={roles}
                   />
                 </CardContent>
               </Card>
@@ -297,7 +327,7 @@ export default function RepositoryPage() {
               },
               {
                 label: "Agent Roles",
-                value: roles?.length ?? 0,
+                value: roles.length,
                 icon: Orbit,
               },
               {
@@ -355,13 +385,7 @@ export default function RepositoryPage() {
         </TabsContent>
 
         <TabsContent value="agents" className="space-y-4">
-          {rolesLoading ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {[1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-48 rounded-xl" />
-              ))}
-            </div>
-          ) : roles && roles.length > 0 ? (
+          {roles.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {roles.map((role, index) => (
                 <motion.div
@@ -430,11 +454,11 @@ export default function RepositoryPage() {
                   </p>
                 </div>
                 <Button
-                  onClick={() => scanMutation.mutate()}
-                  disabled={scanMutation.isPending}
+                  onClick={handleScan}
+                  disabled={scanning}
                   data-testid="button-scan-agents-empty"
                 >
-                  {scanMutation.isPending ? (
+                  {scanning ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
                   ) : (
                     <Search className="w-4 h-4" />
@@ -447,13 +471,7 @@ export default function RepositoryPage() {
         </TabsContent>
 
         <TabsContent value="activity" className="space-y-4">
-          {eventsLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3, 4, 5].map((i) => (
-                <Skeleton key={i} className="h-16 rounded-xl" />
-              ))}
-            </div>
-          ) : events && events.length > 0 ? (
+          {events.length > 0 ? (
             <ScrollArea className="h-[600px]">
               <div className="space-y-2 pr-4">
                 {events.slice(0, activityLimit).map((event) => (
@@ -526,13 +544,7 @@ export default function RepositoryPage() {
         </TabsContent>
 
         <TabsContent value="analyses" className="space-y-4">
-          {analysesLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-24 rounded-xl" />
-              ))}
-            </div>
-          ) : analyses && analyses.length > 0 ? (
+          {analyses.length > 0 ? (
             <div className="space-y-3">
               {analyses.map((analysis, index) => (
                 <motion.div
@@ -592,11 +604,11 @@ export default function RepositoryPage() {
                   No analysis results yet. Run an analysis to get started.
                 </p>
                 <Button
-                  onClick={() => analyzeMutation.mutate()}
-                  disabled={analyzeMutation.isPending}
+                  onClick={handleAnalyze}
+                  disabled={analyzing}
                   data-testid="button-run-analysis-empty"
                 >
-                  {analyzeMutation.isPending ? (
+                  {analyzing ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
                   ) : (
                     <RefreshCw className="w-4 h-4" />
