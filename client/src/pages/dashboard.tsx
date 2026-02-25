@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { motion } from "framer-motion";
@@ -48,10 +48,32 @@ export default function Dashboard() {
     queryKey: ["/api/settings"],
   });
 
+  const seededRef = useRef(false);
+
   const loadRepos = useCallback(async () => {
     try {
       const repositories = await db.getRepositories();
       setRepos(repositories);
+
+      // Auto-seed BintzGavin/helios on first visit when empty
+      if (repositories.length === 0 && !seededRef.current) {
+        seededRef.current = true;
+        try {
+          const res = await apiRequest("POST", "/api/github/repo", { owner: "BintzGavin", name: "helios" });
+          const repoData = await res.json();
+          await db.createRepository({
+            owner: repoData.owner,
+            name: repoData.name,
+            fullName: repoData.fullName,
+            description: repoData.description,
+            defaultBranch: repoData.defaultBranch,
+          });
+          const updatedRepos = await db.getRepositories();
+          setRepos(updatedRepos);
+        } catch (e) {
+          console.error("Failed to seed default repository:", e);
+        }
+      }
     } catch (error) {
       console.error("Failed to load repositories:", error);
     } finally {

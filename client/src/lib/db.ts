@@ -32,18 +32,28 @@ let dbPromise: Promise<IDBPDatabase<BHADatabase>> | null = null;
 
 function getDB() {
   if (!dbPromise) {
-    dbPromise = openDB<BHADatabase>("bha-command-center", 1, {
-      upgrade(db) {
-        db.createObjectStore("repositories", { keyPath: "id" });
+    dbPromise = openDB<BHADatabase>("bha-command-center", 2, {
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore("repositories", { keyPath: "id" });
 
-        const rolesStore = db.createObjectStore("agentRoles", { keyPath: "id" });
-        rolesStore.createIndex("by-repo", "repositoryId");
+          const rolesStore = db.createObjectStore("agentRoles", { keyPath: "id" });
+          rolesStore.createIndex("by-repo", "repositoryId");
 
-        const analysisStore = db.createObjectStore("analysisResults", { keyPath: "id" });
-        analysisStore.createIndex("by-repo", "repositoryId");
+          const analysisStore = db.createObjectStore("analysisResults", { keyPath: "id" });
+          analysisStore.createIndex("by-repo", "repositoryId");
 
-        const eventsStore = db.createObjectStore("activityEvents", { keyPath: "id" });
-        eventsStore.createIndex("by-repo", "repositoryId");
+          const eventsStore = db.createObjectStore("activityEvents", { keyPath: "id" });
+          eventsStore.createIndex("by-repo", "repositoryId");
+        }
+        if (oldVersion < 2) {
+          // Recreate agentRoles store with new schema (files[] instead of promptFile)
+          if (db.objectStoreNames.contains("agentRoles")) {
+            db.deleteObjectStore("agentRoles");
+          }
+          const rolesStore = db.createObjectStore("agentRoles", { keyPath: "id" });
+          rolesStore.createIndex("by-repo", "repositoryId");
+        }
       },
     });
   }
@@ -129,7 +139,7 @@ export const db = {
         ...role,
         id: generateId(),
         repositoryId,
-        planCount: null,
+        planCount: role.files?.filter((f: any) => f.type === "plan").length ?? 0,
         prCount: null,
         lastActiveAt: null,
         createdAt: new Date().toISOString(),

@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Link, useParams } from "wouter";
-import { motion } from "framer-motion";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft,
   GitPullRequest,
@@ -11,6 +13,7 @@ import {
   Loader2,
   Activity,
   Orbit,
+  Calendar,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,17 +28,49 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { GravityRing } from "@/components/gravity-ring";
 import { GravityVisualization } from "@/components/gravity-visualization";
+import { FileContentSheet } from "@/components/file-content-sheet";
+import { PlanListSheet } from "@/components/plan-list-sheet";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { db } from "@/lib/db";
 import type {
   Repository,
   AgentRole,
+  AgentFile,
   ActivityEvent,
   AnalysisResult,
 } from "@shared/schema";
+
+const SCAN_MESSAGES = [
+  "Scanning repository tree...",
+  "Classifying agent files...",
+  "Extracting agent identities...",
+  "Matching plans to agents...",
+  "Parsing prompt boundaries...",
+  "Grouping files by agent...",
+  "Building agent profiles...",
+  "Almost there...",
+];
+
+const FILE_TYPE_LABELS: Record<AgentFile["type"], { label: string; color: string }> = {
+  "planning-prompt": { label: "Planning", color: "bg-blue-500/20 text-blue-400 border-blue-500/30" },
+  "execution-prompt": { label: "Execution", color: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" },
+  "prompt": { label: "Prompt", color: "bg-violet-500/20 text-violet-400 border-violet-500/30" },
+  "status": { label: "Status", color: "bg-amber-500/20 text-amber-400 border-amber-500/30" },
+  "progress": { label: "Progress", color: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30" },
+  "plan": { label: "Plan", color: "bg-pink-500/20 text-pink-400 border-pink-500/30" },
+  "governance": { label: "Governance", color: "bg-orange-500/20 text-orange-400 border-orange-500/30" },
+  "other": { label: "Other", color: "bg-gray-500/20 text-gray-400 border-gray-500/30" },
+};
+
+const CATEGORY_LABELS: Record<string, { label: string; variant: "default" | "secondary" | "outline" }> = {
+  domain: { label: "Domain Agent", variant: "default" },
+  daily: { label: "Daily Agent", variant: "secondary" },
+  shared: { label: "Shared", variant: "outline" },
+};
 
 function getStatusVariant(status: string | null): "default" | "secondary" | "destructive" | "outline" {
   switch (status) {
@@ -67,9 +102,34 @@ export default function RepositoryPage() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
   const [activityLimit, setActivityLimit] = useState(50);
+  const [timespan, setTimespan] = useState<string>("all");
+  const [liveCounts, setLiveCounts] = useState<{ totalCommits: number; totalPrs: number } | null>(null);
+  const [countsLoading, setCountsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
+  const [scanMessage, setScanMessage] = useState(SCAN_MESSAGES[0]);
+  const scanMsgRef = useRef(0);
   const [analyzing, setAnalyzing] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<{ path: string; type: string } | null>(null);
+  const [fileSheetOpen, setFileSheetOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [planListSheetOpen, setPlanListSheetOpen] = useState(false);
+  const [selectedRoleForPlans, setSelectedRoleForPlans] = useState<AgentRole | null>(null);
+  const [openedFromPlanList, setOpenedFromPlanList] = useState(false);
+
+  // Cycle scan status messages while scanning
+  useEffect(() => {
+    if (!scanning) {
+      scanMsgRef.current = 0;
+      setScanMessage(SCAN_MESSAGES[0]);
+      return;
+    }
+    const interval = setInterval(() => {
+      scanMsgRef.current = Math.min(scanMsgRef.current + 1, SCAN_MESSAGES.length - 1);
+      setScanMessage(SCAN_MESSAGES[scanMsgRef.current]);
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [scanning]);
 
   const [repo, setRepo] = useState<Repository | undefined>();
   const [roles, setRoles] = useState<AgentRole[]>([]);
@@ -99,6 +159,78 @@ export default function RepositoryPage() {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Fetch live counts whenever timespan or repo changes
+  useEffect(() => {
+    if (!repo) return;
+    let cancelled = false;
+
+    const fetchCounts = async () => {
+      setCountsLoading(true);
+      try {
+        let since: string | undefined;
+        if (timespan !== "all") {
+          const now = new Date();
+          const ms: Record<string, number> = {
+            "7d": 7 * 86400000,
+            "30d": 30 * 86400000,
+            "90d": 90 * 86400000,
+            "1y": 365 * 86400000,
+          };
+          since = new Date(now.getTime() - (ms[timespan] || 0)).toISOString();
+        }
+
+        const res = await apiRequest("POST", "/api/github/counts", {
+          owner: repo.owner,
+          name: repo.name,
+          since,
+        });
+        const data = await res.json();
+        if (cancelled) return;
+        setLiveCounts(data);
+
+        // Persist all-time counts back to IndexedDB so future page loads aren't stale
+        if (timespan === "all") {
+          await db.updateRepository(repo.id, {
+            totalCommits: data.totalCommits,
+            totalPrs: data.totalPrs,
+          });
+        }
+      } catch (err) {
+        console.error("Failed to fetch counts:", err);
+      } finally {
+        if (!cancelled) setCountsLoading(false);
+      }
+    };
+
+    fetchCounts();
+    return () => { cancelled = true; };
+  }, [repo?.id, repo?.owner, repo?.name, timespan]);
+
+  // Compute since date from timespan for client-side filtering
+  const sinceDate = useMemo(() => {
+    if (timespan === "all") return null;
+    const ms: Record<string, number> = {
+      "7d": 7 * 86400000,
+      "30d": 30 * 86400000,
+      "90d": 90 * 86400000,
+      "1y": 365 * 86400000,
+    };
+    return new Date(Date.now() - (ms[timespan] || 0));
+  }, [timespan]);
+
+  // Filter events + analyses by timespan
+  const filteredEvents = useMemo(() => {
+    if (!sinceDate) return events;
+    return events.filter(e => new Date(e.createdAt) >= sinceDate);
+  }, [events, sinceDate]);
+
+  const filteredAnalyses = useMemo(() => {
+    if (!sinceDate) return analyses;
+    return analyses.filter(a => new Date(a.createdAt) >= sinceDate);
+  }, [analyses, sinceDate]);
+
+  const filteredLatestAnalysis = filteredAnalyses[0] ?? null;
 
   const handleScan = async () => {
     if (!repo) return;
@@ -195,7 +327,7 @@ export default function RepositoryPage() {
     );
   }
 
-  const latestAnalysis = analyses[0];
+  const latestAnalysis = filteredLatestAnalysis;
 
   return (
     <div className="p-6 space-y-6" data-testid="page-repository">
@@ -251,7 +383,7 @@ export default function RepositoryPage() {
         </div>
       </div>
 
-      <Tabs defaultValue="overview" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList data-testid="tabs-repo-detail">
           <TabsTrigger value="overview" data-testid="tab-overview">
             Overview
@@ -268,81 +400,79 @@ export default function RepositoryPage() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3 }}
-            >
-              <Card data-testid="card-gravity-overview">
-                <CardHeader>
-                  <CardTitle className="text-lg">Gravity Score</CardTitle>
-                  <CardDescription>
-                    Overall architectural health metric
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="flex items-center justify-center py-8">
-                  <GravityRing
-                    value={repo.gravityScore ?? 0}
-                    size={160}
-                    strokeWidth={10}
-                  />
-                </CardContent>
-              </Card>
-            </motion.div>
-
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3, delay: 0.1 }}
-            >
-              <Card data-testid="card-visualization">
-                <CardHeader>
-                  <CardTitle className="text-lg">Agent Orbit</CardTitle>
-                  <CardDescription>
-                    Gravitational field visualization
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <GravityVisualization
-                    repoName={repo.name}
-                    roles={roles}
-                  />
-                </CardContent>
-              </Card>
-            </motion.div>
+          {/* Timespan filter bar — controls the entire page */}
+          <div className="flex items-center justify-between gap-3 flex-wrap" data-testid="timespan-filter">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Calendar className="w-3.5 h-3.5" />
+                <span>Period</span>
+              </div>
+              <ToggleGroup
+                type="single"
+                value={timespan}
+                onValueChange={(val) => { if (val) setTimespan(val); }}
+                size="sm"
+                variant="outline"
+                className="gap-0.5"
+              >
+                {[
+                  { value: "7d", label: "7d" },
+                  { value: "30d", label: "30d" },
+                  { value: "90d", label: "90d" },
+                  { value: "1y", label: "1y" },
+                  { value: "all", label: "All time" },
+                ].map((opt) => (
+                  <ToggleGroupItem
+                    key={opt.value}
+                    value={opt.value}
+                    className="text-xs px-3 h-7 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground"
+                    data-testid={`filter-${opt.value}`}
+                  >
+                    {opt.label}
+                  </ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+              {countsLoading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+            </div>
+            <div className="flex items-center gap-2">
+              <GravityRing value={repo.gravityScore ?? 0} size={36} strokeWidth={4} />
+              <span className="text-sm font-semibold">Gravity: {repo.gravityScore ?? 0}</span>
+            </div>
           </div>
 
+          {/* Stats row */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
               {
                 label: "Total PRs",
-                value: repo.totalPrs ?? 0,
+                value: liveCounts?.totalPrs ?? repo.totalPrs ?? 0,
                 icon: GitPullRequest,
+                isCount: true,
               },
               {
                 label: "Total Commits",
-                value: repo.totalCommits ?? 0,
+                value: liveCounts?.totalCommits ?? repo.totalCommits ?? 0,
                 icon: GitCommit,
+                isCount: true,
               },
               {
-                label: "Agent Roles",
-                value: roles.length,
-                icon: Orbit,
-              },
-              {
-                label: "Last Analyzed",
-                value: repo.lastAnalyzedAt
-                  ? new Date(repo.lastAnalyzedAt).toLocaleDateString()
-                  : "Never",
+                label: "Activity Events",
+                value: filteredEvents.length,
                 icon: Activity,
+                isCount: false,
+              },
+              {
+                label: "Analyses",
+                value: filteredAnalyses.length,
+                icon: Orbit,
+                isCount: false,
               },
             ].map((stat, i) => (
               <motion.div
                 key={stat.label}
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3, delay: 0.2 + i * 0.05 }}
+                transition={{ duration: 0.3, delay: 0.1 + i * 0.05 }}
               >
                 <Card data-testid={`card-stat-${stat.label.toLowerCase().replace(/\s/g, "-")}`}>
                   <CardContent className="pt-6">
@@ -350,98 +480,282 @@ export default function RepositoryPage() {
                       <stat.icon className="w-4 h-4" />
                       <span className="text-xs">{stat.label}</span>
                     </div>
-                    <p className="text-xl font-bold">{stat.value}</p>
+                    {countsLoading && stat.isCount ? (
+                      <Skeleton className="h-7 w-16 mt-0.5" />
+                    ) : (
+                      <p className="text-xl font-bold">{stat.value}</p>
+                    )}
                   </CardContent>
                 </Card>
               </motion.div>
             ))}
           </div>
 
-          {latestAnalysis && (
-            <Card data-testid="card-latest-analysis">
-              <CardHeader>
-                <div className="flex items-center gap-3 flex-wrap">
-                  <CardTitle className="text-lg">Latest Analysis</CardTitle>
-                  <Badge variant="outline">
-                    {latestAnalysis.type}
-                  </Badge>
-                </div>
+          {/* Agent Orbit — full width hero */}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: 0.15 }}
+          >
+            <Card data-testid="card-visualization" className="w-full flex flex-col overflow-hidden">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg">Agent Orbit</CardTitle>
+                <CardDescription>
+                  Gravitational field visualization · Click an agent to view details
+                </CardDescription>
               </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  {latestAnalysis.summary}
-                </p>
-                {latestAnalysis.score !== null && (
-                  <p className="text-sm mt-2">
-                    Score:{" "}
-                    <span className="font-semibold">
-                      {latestAnalysis.score}
+              <CardContent className="flex-1 flex items-center justify-center p-0" style={{ minHeight: 250 }}>
+                <GravityVisualization
+                  repoName={repo.name}
+                  roles={roles}
+                  onAgentClick={(roleId) => {
+                    const role = roles.find(r => r.id === roleId);
+                    if (role) {
+                      setSelectedRoleForPlans(role);
+                      setPlanListSheetOpen(true);
+                    }
+                  }}
+                />
+              </CardContent>
+            </Card>
+          </motion.div>
+
+          {/* Latest Analysis — enriched */}
+          {latestAnalysis ? (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3, delay: 0.2 }}
+            >
+              <Card data-testid="card-latest-analysis">
+                <CardHeader>
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-3">
+                      <CardTitle className="text-lg">Latest Analysis</CardTitle>
+                      <Badge variant="outline">{latestAnalysis.type}</Badge>
+                    </div>
+                    <span className="text-xs text-muted-foreground">
+                      {new Date(latestAnalysis.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                     </span>
-                  </p>
-                )}
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {latestAnalysis.summary}
+                    </ReactMarkdown>
+                  </div>
+
+                  {/* Score + metadata row */}
+                  <div className="flex items-center gap-4 flex-wrap">
+                    {latestAnalysis.score !== null && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-muted-foreground">Score</span>
+                        <span className="text-lg font-bold">{latestAnalysis.score}</span>
+                      </div>
+                    )}
+                    {latestAnalysis.details?.commitsAnalyzed != null && (
+                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <GitCommit className="w-3.5 h-3.5" />
+                        <span>{latestAnalysis.details.commitsAnalyzed} commits analyzed</span>
+                      </div>
+                    )}
+                    {latestAnalysis.details?.prsAnalyzed != null && (
+                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <GitPullRequest className="w-3.5 h-3.5" />
+                        <span>{latestAnalysis.details.prsAnalyzed} PRs analyzed</span>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </motion.div>
+          ) : (
+            <Card data-testid="card-no-analysis">
+              <CardContent className="py-8 text-center">
+                <p className="text-sm text-muted-foreground">
+                  {sinceDate ? `No analyses found in the selected time period.` : `No analyses yet. Click "Run Analysis" to get started.`}
+                </p>
               </CardContent>
             </Card>
           )}
         </TabsContent>
 
         <TabsContent value="agents" className="space-y-4">
-          {roles.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {roles.map((role, index) => (
-                <motion.div
-                  key={role.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3, delay: index * 0.05 }}
-                >
-                  <Card data-testid={`card-role-${role.id}`}>
-                    <CardHeader className="flex flex-row items-start justify-between gap-3 flex-wrap pb-3">
-                      <div className="space-y-1 min-w-0 flex-1">
-                        <CardTitle className="text-base">
-                          {role.name}
-                        </CardTitle>
-                        {role.description && (
-                          <CardDescription className="text-xs">
-                            {role.description}
-                          </CardDescription>
-                        )}
-                      </div>
-                      <Badge
-                        variant={getStatusVariant(role.status)}
-                        data-testid={`badge-status-${role.id}`}
+          {/* Scan loading overlay */}
+          <AnimatePresence>
+            {scanning && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                transition={{ duration: 0.3 }}
+              >
+                <Card className="border-primary/20 bg-primary/5">
+                  <CardContent className="flex flex-col items-center justify-center py-16 space-y-6">
+                    <div className="relative">
+                      <svg viewBox="0 0 120 120" className="w-24 h-24">
+                        <defs>
+                          <radialGradient id="scanGlow" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%" stopColor="hsl(258, 90%, 66%)" stopOpacity="0.6" />
+                            <stop offset="100%" stopColor="hsl(258, 90%, 66%)" stopOpacity="0" />
+                          </radialGradient>
+                        </defs>
+                        {/* Pulsing center */}
+                        <circle cx="60" cy="60" r="12" fill="hsl(258, 90%, 66%)">
+                          <animate attributeName="r" values="10;14;10" dur="2s" repeatCount="indefinite" />
+                          <animate attributeName="opacity" values="0.8;1;0.8" dur="2s" repeatCount="indefinite" />
+                        </circle>
+                        <circle cx="60" cy="60" r="24" fill="url(#scanGlow)">
+                          <animate attributeName="r" values="20;28;20" dur="2s" repeatCount="indefinite" />
+                        </circle>
+                        {/* Orbiting dots */}
+                        {[0, 1, 2, 3].map((i) => (
+                          <circle key={i} cx="60" cy="20" r="4" fill="hsl(258, 90%, 66%)" opacity="0.7">
+                            <animateTransform
+                              attributeName="transform"
+                              type="rotate"
+                              from={`${i * 90} 60 60`}
+                              to={`${i * 90 + 360} 60 60`}
+                              dur={`${3 + i * 0.5}s`}
+                              repeatCount="indefinite"
+                            />
+                            <animate attributeName="opacity" values="0.3;0.8;0.3" dur={`${1.5 + i * 0.3}s`} repeatCount="indefinite" />
+                          </circle>
+                        ))}
+                        {/* Orbit ring */}
+                        <circle cx="60" cy="60" r="40" fill="none" stroke="hsl(258, 90%, 66%)" strokeWidth="0.5" strokeDasharray="4 4" opacity="0.3">
+                          <animateTransform attributeName="transform" type="rotate" from="0 60 60" to="360 60 60" dur="20s" repeatCount="indefinite" />
+                        </circle>
+                      </svg>
+                    </div>
+                    <div className="text-center space-y-2">
+                      <motion.p
+                        key={scanMessage}
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        className="text-sm font-medium text-primary"
                       >
-                        {role.status ?? "unknown"}
-                      </Badge>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      {role.promptFile && (
-                        <p className="text-xs text-muted-foreground font-mono truncate">
-                          {role.promptFile}
-                        </p>
-                      )}
-                      <div className="flex items-center gap-4 text-sm text-muted-foreground flex-wrap">
-                        <span>{role.planCount ?? 0} plans</span>
-                        <span>{role.prCount ?? 0} PRs</span>
-                      </div>
-                      {role.boundaries && role.boundaries.length > 0 && (
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          {role.boundaries.map((boundary, bi) => (
-                            <Badge
-                              key={bi}
-                              variant="outline"
-                              className="text-xs"
-                            >
-                              {boundary}
+                        {scanMessage}
+                      </motion.p>
+                      <p className="text-xs text-muted-foreground">
+                        This may take a minute for large repositories
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {!scanning && roles.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {roles.map((role, index) => {
+                const cat = CATEGORY_LABELS[role.category] || CATEGORY_LABELS.shared;
+                return (
+                  <motion.div
+                    key={role.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3, delay: index * 0.05 }}
+                    id={`card-role-${role.id}`}
+                  >
+                    <Card data-testid={`card-role-${role.id}`}>
+                      <CardHeader className="flex flex-row items-start justify-between gap-3 flex-wrap pb-3">
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <CardTitle className="text-base">
+                              {role.name}
+                            </CardTitle>
+                            <Badge variant={cat.variant} className="text-[10px] px-1.5 py-0">
+                              {cat.label}
                             </Badge>
-                          ))}
+                          </div>
+                          {role.description && (
+                            <CardDescription className="text-xs line-clamp-2">
+                              {role.description}
+                            </CardDescription>
+                          )}
                         </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                </motion.div>
-              ))}
+                        <Badge
+                          variant={getStatusVariant(role.status)}
+                          data-testid={`badge-status-${role.id}`}
+                        >
+                          {role.status ?? "unknown"}
+                        </Badge>
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        {/* Attributed files */}
+                        {role.files && role.files.length > 0 && (() => {
+                          const MAX_VISIBLE = 5;
+                          const grouped = role.files.reduce<Record<string, number>>((acc, f) => {
+                            acc[f.type] = (acc[f.type] || 0) + 1;
+                            return acc;
+                          }, {});
+                          const summary = Object.entries(grouped)
+                            .map(([type, count]) => {
+                              const meta = FILE_TYPE_LABELS[type as AgentFile["type"]] || FILE_TYPE_LABELS.other;
+                              return `${count} ${meta.label}${count !== 1 ? "s" : ""}`;
+                            })
+                            .join(" · ");
+                          const nonPlanFiles = role.files.filter(f => f.type !== "plan");
+                          const planFiles = role.files.filter(f => f.type === "plan");
+                          const visibleFiles = nonPlanFiles.slice(0, MAX_VISIBLE);
+                          const hasMore = nonPlanFiles.length > MAX_VISIBLE || planFiles.length > 0;
+                          return (
+                            <div className="space-y-2">
+                              <p className="text-xs font-medium text-muted-foreground">
+                                {summary}
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {visibleFiles.map((file, fi) => {
+                                  const meta = FILE_TYPE_LABELS[file.type] || FILE_TYPE_LABELS.other;
+                                  const fileName = file.path.split("/").pop() || file.path;
+                                  return (
+                                    <button
+                                      key={fi}
+                                      onClick={() => {
+                                        setSelectedFile({ path: file.path, type: file.type });
+                                        setOpenedFromPlanList(false);
+                                        setFileSheetOpen(true);
+                                      }}
+                                      className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border cursor-pointer hover:opacity-80 transition-opacity ${meta.color}`}
+                                      title={`Click to view ${file.path}`}
+                                    >
+                                      <span className="font-medium">{meta.label}</span>
+                                      <span className="opacity-70 truncate max-w-[120px]">{fileName}</span>
+                                    </button>
+                                  );
+                                })}
+                                {planFiles.length > 0 && (
+                                  <button
+                                    onClick={() => {
+                                      setSelectedRoleForPlans(role);
+                                      setPlanListSheetOpen(true);
+                                    }}
+                                    className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border cursor-pointer hover:opacity-80 transition-opacity ${FILE_TYPE_LABELS.plan.color}`}
+                                    title={`Click to browse ${planFiles.length} plan files`}
+                                  >
+                                    <span className="font-medium">{planFiles.length} Plans</span>
+                                  </button>
+                                )}
+                                {nonPlanFiles.length > MAX_VISIBLE && (
+                                  <span className="inline-flex items-center text-[10px] px-1.5 py-0.5 rounded border border-border text-muted-foreground">
+                                    +{nonPlanFiles.length - MAX_VISIBLE} more
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </CardContent>
+                    </Card>
+                  </motion.div>
+                );
+              })}
             </div>
-          ) : (
+          ) : !scanning ? (
             <Card data-testid="card-no-agents">
               <CardContent className="flex flex-col items-center justify-center py-12 space-y-4">
                 <div className="flex items-center justify-center w-12 h-12 rounded-full bg-muted">
@@ -458,16 +772,12 @@ export default function RepositoryPage() {
                   disabled={scanning}
                   data-testid="button-scan-agents-empty"
                 >
-                  {scanning ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Search className="w-4 h-4" />
-                  )}
+                  <Search className="w-4 h-4" />
                   Scan for Agents
                 </Button>
               </CardContent>
             </Card>
-          )}
+          ) : null}
         </TabsContent>
 
         <TabsContent value="activity" className="space-y-4">
@@ -576,18 +886,46 @@ export default function RepositoryPage() {
                           </span>
                         )}
                       </div>
-                      <p className="text-sm text-muted-foreground">
-                        {analysis.summary}
-                      </p>
+                      <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {analysis.summary}
+                        </ReactMarkdown>
+                      </div>
                       {analysis.details != null && (
-                        <details className="text-xs">
-                          <summary className="cursor-pointer text-muted-foreground">
-                            View details
-                          </summary>
-                          <pre className="mt-2 p-3 bg-muted rounded-md overflow-auto text-xs">
-                            {String(JSON.stringify(analysis.details, null, 2))}
-                          </pre>
-                        </details>
+                        <div className="pt-2 space-y-4">
+                          <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
+                            {(analysis.details as any).commitsAnalyzed != null && (
+                              <div className="flex items-center gap-1.5">
+                                <GitCommit className="w-3.5 h-3.5" />
+                                <span>
+                                  {(analysis.details as any).commitsAnalyzed} commits analyzed
+                                </span>
+                              </div>
+                            )}
+                            {(analysis.details as any).prsAnalyzed != null && (
+                              <div className="flex items-center gap-1.5">
+                                <GitPullRequest className="w-3.5 h-3.5" />
+                                <span>
+                                  {(analysis.details as any).prsAnalyzed} PRs analyzed
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          {(analysis.details as any).fullResponse && (
+                            <details className="text-sm border rounded-md open:bg-muted/30">
+                              <summary className="cursor-pointer font-medium p-3 hover:bg-muted/50 rounded-md transition-colors">
+                                View Full Analysis
+                              </summary>
+                              <div className="p-4 pt-2 border-t mt-1">
+                                <article className="prose prose-sm dark:prose-invert max-w-none prose-headings:scroll-mt-4 prose-pre:bg-muted prose-pre:text-foreground prose-code:text-foreground prose-code:before:content-none prose-code:after:content-none">
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {(analysis.details as any).fullResponse}
+                                  </ReactMarkdown>
+                                </article>
+                              </div>
+                            </details>
+                          )}
+                        </div>
                       )}
                     </CardContent>
                   </Card>
@@ -620,6 +958,40 @@ export default function RepositoryPage() {
           )}
         </TabsContent>
       </Tabs>
+      <FileContentSheet
+        open={fileSheetOpen}
+        onOpenChange={setFileSheetOpen}
+        filePath={selectedFile?.path ?? null}
+        fileType={selectedFile?.type ?? null}
+        repoOwner={repo.owner}
+        repoName={repo.name}
+        repoBranch={repo.defaultBranch || "main"}
+        onBack={openedFromPlanList ? () => {
+          setFileSheetOpen(false);
+          setPlanListSheetOpen(true);
+        } : undefined}
+      />
+      <PlanListSheet
+        open={planListSheetOpen}
+        onOpenChange={setPlanListSheetOpen}
+        files={selectedRoleForPlans?.files?.filter(f => f.type === "plan") ?? null}
+        prEvents={events.filter(e => {
+          if (e.type !== "pull_request" || !selectedRoleForPlans) return false;
+          const roleName = selectedRoleForPlans.name.toLowerCase();
+          const title = (e.title || "").toLowerCase();
+          const desc = (e.description || "").toLowerCase();
+          return title.includes(roleName) || desc.includes(roleName);
+        })}
+        repoOwner={repo.owner}
+        repoName={repo.name}
+        roleName={selectedRoleForPlans?.name}
+        onSelectFile={(file) => {
+          setSelectedFile({ path: file.path, type: file.type });
+          setOpenedFromPlanList(true);
+          setPlanListSheetOpen(false);
+          setFileSheetOpen(true);
+        }}
+      />
     </div>
   );
 }

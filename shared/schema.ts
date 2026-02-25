@@ -20,12 +20,18 @@ export interface Repository {
   createdAt: string;
 }
 
+export interface AgentFile {
+  path: string;
+  type: "planning-prompt" | "execution-prompt" | "prompt" | "status" | "progress" | "plan" | "governance" | "other";
+}
+
 export interface AgentRole {
   id: string;
   repositoryId: string;
   name: string;
   description: string | null;
-  promptFile: string | null;
+  files: AgentFile[];
+  category: "domain" | "daily" | "shared";
   boundaries: string[] | null;
   status: string | null;
   planCount: number | null;
