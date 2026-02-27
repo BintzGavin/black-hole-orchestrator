@@ -1,7 +1,8 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { Octokit } from "@octokit/rest";
-import { generateText } from "ai";
+import { generateText, generateObject } from "ai";
+import { highFidelityAnalysisSchema } from "../shared/schema.js";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
@@ -356,6 +357,29 @@ export async function registerRoutes(
       }
       await Promise.all(Array.from(uniquePaths).map((p) => fetchContent(p)));
 
+      // Fetch dates for dynamically created agent files (plans, status, progress)
+      const fileDateCache = new Map<string, string>();
+      async function fetchFileDate(filePath: string): Promise<string | null> {
+        if (fileDateCache.has(filePath)) return fileDateCache.get(filePath)!;
+        try {
+          const { data } = await octokit.rest.repos.listCommits({ owner, repo: name, path: filePath, per_page: 1 });
+          if (data.length > 0 && data[0].commit.author?.date) {
+             const d = data[0].commit.author.date;
+             fileDateCache.set(filePath, d);
+             return d;
+          }
+        } catch {}
+        return null;
+      }
+      
+      const filePathsToDate = new Set<string>();
+      for (const cf of classified) {
+        if (cf.fileType === "plan" || cf.fileType === "status" || cf.fileType === "progress") {
+          filePathsToDate.add(cf.path);
+        }
+      }
+      await Promise.all(Array.from(filePathsToDate).map(p => fetchFileDate(p)));
+
       // Now build roles from cached content (no more API calls)
       const roles = [];
       for (const { agentName, files, descPath, boundaryPath } of workItems) {
@@ -387,7 +411,7 @@ export async function registerRoutes(
         roles.push({
           name: displayName,
           description,
-          files: files.map((f) => ({ path: f.path, type: f.fileType })),
+          files: files.map((f) => ({ path: f.path, type: f.fileType, date: fileDateCache.get(f.path) || null })),
           category,
           boundaries: boundaries && boundaries.length > 0 ? boundaries : null,
           status: "active",
@@ -447,6 +471,7 @@ export async function registerRoutes(
           additions: commit.stats?.additions || 0,
           deletions: commit.stats?.deletions || 0,
           filesChanged: commit.files?.length || 0,
+          createdAt: commit.commit.author?.date || new Date().toISOString(),
         });
       }
 
@@ -460,6 +485,7 @@ export async function registerRoutes(
           additions: (pr as any).additions || 0,
           deletions: (pr as any).deletions || 0,
           filesChanged: (pr as any).changed_files || 0,
+          createdAt: pr.created_at || pr.updated_at || new Date().toISOString(),
         });
       }
 
@@ -468,21 +494,21 @@ export async function registerRoutes(
 
       const prompt = `Analyze the following git activity for the repository "${owner}/${name}", which operates using the Black Hole Architecture.
 
-1. First line must exactly be: GRAVITY_SCORE: <number 0-100> (where 100 means very strong momentum towards the Vision).
-2. The rest of the response should be a rich Markdown-formatted analysis. Use Markdown features aggressively to make it readable:
-   - Use headers (## System Convergence, ## Thrashing/Friction, ## Recommendations)
-   - Use bullet points for lists
-   - Use **bold** text and \`code blocks\` for emphasis
+ROLE & OBJECTIVE:
+Act as a Principal Product Strategist and expert Technical Advisor who is deeply committed to the long-term success of this repository. 
+Your goal is to provide high-level, actionable guidance that propels the project forward. You must evaluate the activity not just for mechanical correctness, but for product value, user experience, and strategic momentum. Look at the big picture and identify what matters most for the system's success.
+      
+IMPORTANT RULES:
+1. All agents commit under the human's Git identity. DO NOT flag a single commit author as an issue or anomaly. This is expected behavior.
+2. Balance your analysis: rigidly enforce the underlying architectural health (quality, velocity, boundary correctness) WHILE actively guiding the broader product trajectory (value delivery, UX refinement, strategic focus).
 
-IMPORTANT CONTEXT:
-Do not explain the Black Hole Architecture to the user—they already know about Jules, temporal scheduling, strict role separation (planners vs executors), file ownership, memory files, and the Vision constraint model. 
+Do not explain the Black Hole Architecture (Jules, temporal scheduling, strict role separation, file ownership, memory files). Instead, intuitively apply this knowledge to evaluate the actual git activity.
 
-Instead, apply this knowledge to evaluate the actual git activity. Focus your analysis on what matters in this specific architecture:
-- Are planners emitting tight, actionable specs?
-- Are executors staying within their boundaries and successfully merging changes?
-- Is the system converging towards the vision, or are agents thrashing on specific files?
-- Are there any gaps between the observed execution and the ideal Black Hole principles?
-- Identify any "weak signals" (e.g., recurring failures, memory file churn) and provide actionable recommendations.
+Questions to answer deeply in your analysis:
+- Product & Strategy Directive: Are we building the right things? Synthesize the recent activity to recommend the highest-leverage strategic next steps that will maximize value and momentum.
+- Architectural Execution: Are planners emitting tight, actionable specs? Are executors staying strictly within their boundaries and successfully merging changes without friction?
+- Momentum & Convergence: Is the system rapidly converging towards its vision, or are agents thrashing, looping, or churning on specific files?
+- Advisory & Course Correction: Identify any "weak signals" (e.g., recurring logic failures, memory file drift, scope creep) that need immediate addressing. Provide strongly opinionated, actionable recommendations to ensure the team succeeds.
 
 Recent Commits (last ${commits.length}):
 ${commitSummary}
@@ -491,24 +517,23 @@ Recent Pull Requests (last ${prs.length}):
 ${prSummary}
 
 Total commits fetched: ${commits.length}
-Total PRs fetched: ${prs.length}`;
+Total PRs fetched: ${prs.length}
+
+You must respond with a fully populated JSON object matching the requested schema.`;
 
       const model = getAIModel(env.aiProvider, env.aiApiKey, env.aiModel);
-      const { text } = await generateText({ model, prompt });
-
-      let gravityScore = 50;
-      const scoreMatch = text.match(/GRAVITY_SCORE:\s*(\d+)/i);
-      if (scoreMatch) {
-        gravityScore = Math.min(100, Math.max(0, parseInt(scoreMatch[1], 10)));
-      }
-
-      // The summary is everything after the gravity score line
-      let summary = text.replace(/GRAVITY_SCORE:\s*\d+/i, "").trim();
+      
+      const { object: result } = await generateObject({
+        model,
+        schema: highFidelityAnalysisSchema,
+        prompt,
+      });
 
       res.json({
-        gravityScore,
-        summary,
-        fullResponse: text,
+        gravityScore: result.gravityScore,
+        summary: result.executiveSummary, // Provide fallback for legacy components
+        analysis: result, // Full structured object
+        fullResponse: JSON.stringify(result, null, 2),
         commitsAnalyzed: realTotalCommits,
         prsAnalyzed: realTotalPrs,
         activityEvents,

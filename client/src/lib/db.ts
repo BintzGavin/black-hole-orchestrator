@@ -174,7 +174,7 @@ export const db = {
     return events.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   },
 
-  async setActivityEvents(repositoryId: string, events: Omit<ActivityEvent, "id" | "repositoryId" | "createdAt" | "agentRoleId">[]): Promise<ActivityEvent[]> {
+  async setActivityEvents(repositoryId: string, events: Omit<ActivityEvent, "id" | "repositoryId" | "agentRoleId">[]): Promise<ActivityEvent[]> {
     const database = await getDB();
     const tx = database.transaction("activityEvents", "readwrite");
     const index = tx.store.index("by-repo");
@@ -188,7 +188,7 @@ export const db = {
         id: generateId(),
         repositoryId,
         agentRoleId: null,
-        createdAt: new Date().toISOString(),
+        createdAt: event.createdAt || new Date().toISOString(),
       };
       await tx.store.put(activityEvent);
       created.push(activityEvent);

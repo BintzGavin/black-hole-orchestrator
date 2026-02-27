@@ -33,9 +33,19 @@ export function PlanListSheet({ open, onOpenChange, files, prEvents = [], repoOw
 
   const hasPrs = prEvents.length > 0;
 
+  const sortedFiles = [...files].sort((a, b) => {
+    const dateA = a.date ? new Date(a.date).getTime() : 0;
+    const dateB = b.date ? new Date(b.date).getTime() : 0;
+    return dateB - dateA;
+  });
+
+  const sortedPrs = [...prEvents].sort((a, b) => {
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  });
+
   const filesList = (
     <>
-      {files.map((file, i) => (
+      {sortedFiles.map((file, i) => (
         <button
           key={i}
           onClick={() => {
@@ -85,7 +95,7 @@ export function PlanListSheet({ open, onOpenChange, files, prEvents = [], repoOw
                 {filesList}
               </TabsContent>
               <TabsContent value="prs" className="mt-0 space-y-2 pb-8">
-                {prEvents.map((pr) => (
+                {sortedPrs.map((pr) => (
                   <a
                     key={pr.id}
                     href={`https://github.com/${repoOwner}/${repoName}/pull/${pr.prNumber}`}

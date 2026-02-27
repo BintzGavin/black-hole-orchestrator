@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, Settings, Orbit, Sun, Moon } from "lucide-react";
+import { LayoutDashboard, Settings, Sun, Moon } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -30,15 +30,15 @@ export function AppSidebar() {
       <SidebarHeader className="p-4">
         <Link href="/" data-testid="link-logo">
           <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-9 h-9 rounded-md bg-sidebar-primary/20">
-              <Orbit className="w-5 h-5 text-sidebar-primary" />
+            <div className="flex items-center justify-center w-9 h-9 overflow-hidden rounded-md bg-black">
+              <img src="/logo.png" alt="Black Hole Logo" className="w-full h-full object-contain" />
             </div>
             <div className="flex flex-col">
               <span className="text-sm font-bold tracking-tight text-sidebar-foreground">
-                BHA Command Center
+                Black Hole Orchestrator
               </span>
               <span className="text-xs text-sidebar-foreground/50">
-                Mission Control
+                Gravity Control
               </span>
             </div>
           </div>

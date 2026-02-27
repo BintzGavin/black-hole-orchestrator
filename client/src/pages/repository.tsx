@@ -14,6 +14,10 @@ import {
   Activity,
   Orbit,
   Calendar,
+  CheckCircle2,
+  AlertTriangle,
+  ShieldAlert,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -42,6 +46,7 @@ import type {
   AgentFile,
   ActivityEvent,
   AnalysisResult,
+  HighFidelityAnalysis,
 } from "@shared/schema";
 
 const SCAN_MESSAGES = [
@@ -504,10 +509,12 @@ export default function RepositoryPage() {
                   Gravitational field visualization · Click an agent to view details
                 </CardDescription>
               </CardHeader>
-              <CardContent className="flex-1 flex items-center justify-center p-0" style={{ minHeight: 250 }}>
+              <CardContent className="p-0 w-full h-[800px]">
                 <GravityVisualization
                   repoName={repo.name}
                   roles={roles}
+                  agentStates={latestAnalysis?.details?.analysis?.agentStates}
+                  className="h-full"
                   onAgentClick={(roleId) => {
                     const role = roles.find(r => r.id === roleId);
                     if (role) {
@@ -540,11 +547,107 @@ export default function RepositoryPage() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {latestAnalysis.summary}
-                    </ReactMarkdown>
-                  </div>
+                  {(() => {
+                    const analysisData = latestAnalysis.details?.analysis as HighFidelityAnalysis | undefined;
+                    if (analysisData) {
+                      return (
+                        <div className="space-y-6">
+                          <div className="bg-primary/5 p-4 rounded-lg border border-primary/20">
+                            <h4 className="flex items-center gap-2 font-semibold text-primary mb-2 text-sm">
+                              <Zap className="w-4 h-4" /> Executive Summary
+                            </h4>
+                            <p className="text-sm text-foreground/90">{analysisData.executiveSummary}</p>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {analysisData.significantProgress.length > 0 && (
+                              <div className="space-y-3">
+                                <h4 className="flex items-center gap-2 font-semibold text-sm">
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-500" /> Recent Progress
+                                </h4>
+                                <div className="space-y-2">
+                                  {analysisData.significantProgress.map((prog, i) => (
+                                    <div key={i} className="flex gap-2 text-sm bg-muted/50 p-2 rounded border border-border/50">
+                                      <Badge variant="outline" className="h-fit capitalize text-[10px]">{prog.actor}</Badge>
+                                      <span className="text-muted-foreground leading-snug">{prog.description}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {analysisData.frictionAndThrashing.length > 0 && (
+                              <div className="space-y-3">
+                                <h4 className="flex items-center gap-2 font-semibold text-sm">
+                                  <AlertTriangle className="w-4 h-4 text-amber-500" /> Friction Areas
+                                </h4>
+                                <div className="space-y-2">
+                                  {analysisData.frictionAndThrashing.map((frict, i) => (
+                                    <div key={i} className="flex flex-col gap-1.5 text-sm bg-muted/50 p-2.5 rounded border border-border/50">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <Badge variant={frict.severity === "critical" ? "destructive" : frict.severity === "medium" ? "secondary" : "outline"} className="text-[10px]">
+                                          {frict.severity}
+                                        </Badge>
+                                        <span className="font-medium text-foreground">{frict.component}</span>
+                                      </div>
+                                      <span className="text-muted-foreground text-xs leading-relaxed">{frict.issue}</span>
+                                      <div className="bg-background/50 p-1.5 rounded mt-0.5 border border-amber-500/20">
+                                        <span className="text-[11px] text-amber-600 dark:text-amber-400 font-medium tracking-tight">Cause: {frict.suspectedCause}</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {analysisData.boundaryViolations.length > 0 && (
+                            <div className="space-y-3">
+                              <h4 className="flex items-center gap-2 font-semibold text-sm text-destructive">
+                                <ShieldAlert className="w-4 h-4" /> Boundary Violations
+                              </h4>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                {analysisData.boundaryViolations.map((viol, i) => (
+                                  <div key={i} className="flex flex-col gap-1 text-sm bg-destructive/5 p-2.5 rounded border border-destructive/20">
+                                    <span className="font-semibold text-destructive">{viol.agentOrRole}</span>
+                                    <span className="text-foreground/90 text-xs">{viol.violation}</span>
+                                    <span className="text-[10px] text-muted-foreground mt-1 truncate" title={viol.evidence}>Evidence: {viol.evidence}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {analysisData.orchestratorActions.length > 0 && (
+                            <div className="space-y-3 mt-2">
+                              <h4 className="flex items-center gap-2 font-semibold text-sm">
+                                <Activity className="w-4 h-4 text-blue-500" /> Recommended Actions
+                              </h4>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                                {analysisData.orchestratorActions.map((act, i) => (
+                                  <div key={i} className="flex flex-col gap-2 text-sm bg-muted/30 p-2.5 rounded border border-border/50">
+                                    <div className="flex justify-between items-start gap-2">
+                                      <span className="font-medium text-foreground text-xs leading-none mt-0.5">{act.action}</span>
+                                      <Badge variant={act.urgency === "do-now" ? "default" : "outline"} className="text-[9px] shrink-0 h-4 px-1">{act.urgency}</Badge>
+                                    </div>
+                                    <span className="text-[11px] text-muted-foreground leading-relaxed">{act.reason}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="prose prose-sm dark:prose-invert max-w-none text-muted-foreground border-b border-border/50 pb-4 mb-4">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {latestAnalysis.summary}
+                        </ReactMarkdown>
+                      </div>
+                    );
+                  })()}
 
                   {/* Score + metadata row */}
                   <div className="flex items-center gap-4 flex-wrap">
