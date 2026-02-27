@@ -82,7 +82,7 @@ function MoltenCore(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/molten-core.glb"
+      modelPath="/models/molten-core-opt.glb"
       atmosColor="#ff3300"
       emissiveColor="#ff1100"
       emissiveIntensity={1.5}
@@ -98,7 +98,7 @@ function AzureTempest(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/azure-tempest.glb"
+      modelPath="/models/azure-tempest-opt.glb"
       atmosColor="#00aaff"
       emissiveColor="#0066dd"
       emissiveIntensity={1.2}
@@ -114,7 +114,7 @@ function EmeraldNeon(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/emerald-neon.glb"
+      modelPath="/models/emerald-neon-opt.glb"
       atmosColor="#00ff66"
       emissiveColor="#00cc44"
       emissiveIntensity={1.3}
@@ -130,7 +130,7 @@ function EmberSphere(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/ember-sphere.glb"
+      modelPath="/models/ember-sphere-opt.glb"
       atmosColor="#ff8800"
       emissiveColor="#ff5500"
       emissiveIntensity={1.0}
@@ -146,7 +146,7 @@ function CosmicRose(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/cosmic-rose.glb"
+      modelPath="/models/cosmic-rose-opt.glb"
       atmosColor="#ff44aa"
       emissiveColor="#cc0066"
       emissiveIntensity={1.2}
@@ -162,7 +162,7 @@ function IronOrb(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/iron-orb.glb"
+      modelPath="/models/iron-orb-opt.glb"
       atmosColor="#88aacc"
       emissiveColor="#4477aa"
       emissiveIntensity={0.8}
@@ -178,7 +178,7 @@ function JovianRinged(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/jovian-ringed.glb"
+      modelPath="/models/jovian-ringed-opt.glb"
       atmosColor="#e4d6a7"
       emissiveColor="#cca466"
       emissiveIntensity={0.8}
@@ -194,7 +194,7 @@ function MoltenEmber(props: PlanetProps) {
   return (
     <GLBPlanet
       {...props}
-      modelPath="/models/molten-ember.glb"
+      modelPath="/models/molten-ember-opt.glb"
       atmosColor="#ff4400"
       emissiveColor="#cc2200"
       emissiveIntensity={1.4}
@@ -253,18 +253,6 @@ function AlienFractal({ baseSize, isDrifting }: PlanetProps) {
     </group>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Preload all GLB models
-// ---------------------------------------------------------------------------
-useGLTF.preload('/models/molten-core.glb');
-useGLTF.preload('/models/azure-tempest.glb');
-useGLTF.preload('/models/emerald-neon.glb');
-useGLTF.preload('/models/ember-sphere.glb');
-useGLTF.preload('/models/cosmic-rose.glb');
-useGLTF.preload('/models/iron-orb.glb');
-useGLTF.preload('/models/jovian-ringed.glb');
-useGLTF.preload('/models/molten-ember.glb');
 
 // ---------------------------------------------------------------------------
 // Main Selector Component

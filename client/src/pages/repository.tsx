@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Link, useParams } from "wouter";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { format } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowLeft,
@@ -100,7 +101,12 @@ function getEventIcon(type: string) {
       return <GitBranch className="w-4 h-4" />;
     default:
       return <Activity className="w-4 h-4" />;
-  }
+}
+
+export function formatTimestamp(dateInput: string | Date | number) {
+  const date = new Date(dateInput);
+  const tzAbbr = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' }).format(date).split(' ').pop();
+  return `${format(date, "MMM d, yyyy h:mmaaa")} ${tzAbbr}`;
 }
 
 export default function RepositoryPage() {
@@ -542,7 +548,7 @@ export default function RepositoryPage() {
                       <Badge variant="outline">{latestAnalysis.type}</Badge>
                     </div>
                     <span className="text-xs text-muted-foreground">
-                      {new Date(latestAnalysis.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      {formatTimestamp(latestAnalysis.createdAt)}
                     </span>
                   </div>
                 </CardHeader>
@@ -906,7 +912,7 @@ export default function RepositoryPage() {
                           {event.author && <span>{event.author}</span>}
                           {event.createdAt && (
                             <span>
-                              {new Date(event.createdAt).toLocaleDateString()}
+                              {formatTimestamp(event.createdAt)}
                             </span>
                           )}
                           {(event.filesChanged ?? 0) > 0 && (
@@ -983,9 +989,7 @@ export default function RepositoryPage() {
                         </div>
                         {analysis.createdAt && (
                           <span className="text-xs text-muted-foreground">
-                            {new Date(
-                              analysis.createdAt
-                            ).toLocaleDateString()}
+                            {formatTimestamp(analysis.createdAt)}
                           </span>
                         )}
                       </div>
