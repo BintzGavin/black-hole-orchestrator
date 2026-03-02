@@ -12,7 +12,7 @@ export const highFidelityAnalysisSchema = z.object({
   significantProgress: z.array(z.object({
     description: z.string(),
     actor: z.enum(["planner", "executor", "human"]),
-    link: z.string().optional(),
+    link: z.string().nullable(),
   })),
   frictionAndThrashing: z.array(z.object({
     component: z.string(),

@@ -1,6 +1,6 @@
 import type { AgentRole } from "@shared/schema";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, Html, Line, Trail, Stars, Sparkles, Environment } from "@react-three/drei";
+import { OrbitControls, Html, Line, Trail, Stars, Sparkles, Environment, useGLTF, Clone } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import { useRef, useMemo, useState, useEffect, Suspense } from "react";
 import * as THREE from "three";
@@ -13,6 +13,9 @@ interface GravityVisualizationProps {
   className?: string;
   onAgentClick?: (roleId: string) => void;
 }
+
+// Create a global target vector that the camera can smoothly track for the alien follow cam
+const alienTargetPos = new THREE.Vector3();
 
 function getStatusColor(status: string | null): string {
   switch (status) {
@@ -273,6 +276,182 @@ function CameraSetup() {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Alien Spaceship Component
+// ---------------------------------------------------------------------------
+function AlienSpaceship({ isFollowing, isGlobalPaused }: { isFollowing: boolean; isGlobalPaused: boolean }) {
+  const { scene } = useGLTF("/models/alien-riding.glb");
+  const groupRef = useRef<THREE.Group>(null);
+  const time = useRef(Math.random() * 100);
+
+  // Use variables to keep track of current position for smooth interpolation
+  const currentPos = useRef(new THREE.Vector3());
+  const targetPos = useRef(new THREE.Vector3());
+
+  useFrame((state, delta) => {
+    if (!groupRef.current) return;
+    
+    // Only accumulate time (and therefore movement) if a planet isn't hovered
+    if (!isGlobalPaused) {
+      time.current += delta;
+    }
+    
+    // Slow down time for a less frantic, smoother path
+    const t = time.current * 0.15;
+    
+    // Create a rambling, curving 3D path using lower frequency sine/cosine
+    const x = Math.sin(t * 1.1) * 80 + Math.cos(t * 0.8) * 40;
+    const y = Math.cos(t * 1.3) * 40 + Math.sin(t * 0.9) * 30;
+    const z = Math.sin(t * 0.7) * 80 + Math.sin(t * 1.5) * 40;
+    
+    targetPos.current.set(x, y, z);
+    
+    // Initialize current position on first frame to prevent snapping from origin
+    if (currentPos.current.lengthSq() === 0) {
+      currentPos.current.copy(targetPos.current);
+      groupRef.current.position.copy(currentPos.current);
+    }
+    
+    // Smoothly interpolate current position towards target position
+    currentPos.current.lerp(targetPos.current, 0.05);
+    groupRef.current.position.copy(currentPos.current);
+    
+    // Predict next position on the path for looking/rotation
+    const nextT = t - 0.02; // Look slightly *behind* in time if the math is making him fly backward natively! Or we just flip the logic.
+    // Instead of messing with negative time, let's just make the target vector the normal way but flip the lookAt to look mathematically forward 
+    const nextX = Math.sin((t + 0.02) * 1.1) * 80 + Math.cos((t + 0.02) * 0.8) * 40;
+    const nextY = Math.cos((t + 0.02) * 1.3) * 40 + Math.sin((t + 0.02) * 0.9) * 30;
+    const nextZ = Math.sin((t + 0.02) * 0.7) * 80 + Math.sin((t + 0.02) * 1.5) * 40;
+    
+    const futurePos = new THREE.Vector3(nextX, nextY, nextZ);
+    
+    // The issue is his flight path "forward" movement vector versus the GLTF native facing direction.
+    // If he was flying backwards along his path, the quickest way is to just look the *other* way relative to his velocity.
+    const lookAtDirection = new THREE.Vector3().subVectors(futurePos, currentPos.current).normalize();
+    
+    // Instead of looking at futurePos (which makes him fly backwards), we look at currentPos + flipped velocity vector
+    const flippedLookAtPos = currentPos.current.clone().sub(lookAtDirection.multiplyScalar(5));
+    
+    groupRef.current.lookAt(flippedLookAtPos);
+    
+    // Add realistic 3D banking depending on the turning direction
+    // Calculate the difference between current forward vector and the turn target
+    const currentForward = new THREE.Vector3(0, 0, 1).applyQuaternion(groupRef.current.quaternion);
+    const targetVector = new THREE.Vector3().subVectors(flippedLookAtPos, currentPos.current).normalize();
+    
+    // Cross product gives us a vector perpendicular to both, its length tells us turning severity
+    const turnVector = new THREE.Vector3().crossVectors(currentForward, targetVector);
+    // Apply banking roll based on the turn severity (Y-axis of the cross product)
+    groupRef.current.rotateZ(turnVector.y * 10); // Multiply for a noticeable bank
+    
+    // Add subtle bobbing up and down
+    groupRef.current.translateY(Math.sin(time.current * 2) * 0.5);
+
+    // Always update the shared target position vector so the free camera can track it if active
+    alienTargetPos.copy(currentPos.current);
+  });
+
+  return (
+    <group ref={groupRef}>
+      {/* 
+        50% larger scale: 3.25 * 1.50 = ~4.875 
+        Using rotation [0, Math.PI / 2, 0] so he faces the flames properly 
+      */}
+      <Clone object={scene} scale={4.875} rotation={[0, Math.PI / 2, 0]} />
+      
+      {/* 
+        Fire Exhaust System 
+        Positioned at +Z (behind) relative to the ship group, which now accurately faces forward (-Z).
+        Slightly lowered (-1.95 Y) to align with the bottom/tail pipe on the 3D model footprint.
+        Pulled slightly forward (4.5 Z) to connect deeper into the model exhaust nozzle.
+        Shrunk heavily by 5x to 0.15 scale based on feedback.
+      */}
+      <group position={[0, -2.35, 2.5]} scale={0.2}>
+        {/* Core hot blue/white plasma right at the engine */}
+        <mesh position={[0, 0, 0]} scale={[1, 1, 2]}>
+          <boxGeometry args={[0.5, 0.5, 1]} />
+          <meshBasicMaterial color="#ffffff" transparent opacity={0.9} blending={THREE.AdditiveBlending} />
+        </mesh>
+        {/* Intense yellow-orange inner flame */}
+        <mesh position={[0, 0, 0.8]} scale={[1, 1, 3]}>
+          <sphereGeometry args={[0.9, 16, 16]} />
+          <meshBasicMaterial color="#ffaa00" transparent opacity={0.7} blending={THREE.AdditiveBlending} />
+        </mesh>
+        {/* Billowing red/orange outer aura/smoke */}
+        <mesh position={[0, 0, 1.5]} scale={[1, 1, 4]}>
+          <sphereGeometry args={[1.3, 16, 16]} />
+          <meshBasicMaterial color="#ff3300" transparent opacity={0.4} blending={THREE.AdditiveBlending} />
+        </mesh>
+        {/* Trailing embers pulled far back out of the tailpipe */}
+        <Sparkles 
+          count={100} 
+          scale={[1.5, 1.5, 10]} 
+          size={8} 
+          speed={1.0} 
+          opacity={0.9} 
+          color="#ff4400" 
+          position={[0, 0, 5]} 
+        />
+      </group>
+    </group>
+  );
+}
+
+useGLTF.preload("/models/alien-riding.glb");
+
+
+// Alien Tracking Camera Component
+function AlienCameraTracker({ isFollowing }: { isFollowing: boolean }) {
+  const { camera } = useThree();
+  const controlsRef = useRef<any>(null);
+  const offsetRef = useRef(new THREE.Vector3(25, 5, 10)); // Initial offset: right side, slightly up, behind
+  const tempVec = useRef(new THREE.Vector3());
+  
+  // Need to force camera near original ideal position once when toggling mode
+  // The OrbitControls will handle looking at alienTargetPos, but the camera itself needs to ride along
+  
+  useEffect(() => {
+    if (isFollowing && controlsRef.current) {
+      // Upon activation, immediately snap camera to the preferred right-side view
+      // We can't know absolute orientation here without the ship's groupRef, 
+      // but OrbitControls will ease it in once we're close.
+      camera.position.copy(alienTargetPos).add(offsetRef.current);
+    }
+  }, [isFollowing, camera]);
+
+  useFrame(() => {
+    if (!isFollowing || !controlsRef.current) return;
+    
+    // Smoothly interpolate the controls target to the actual alien position
+    // This allows OrbitControls to stay centered on the ship as it moves
+    controlsRef.current.target.lerp(alienTargetPos, 0.1);
+    
+    // The camera position naturally trails along with the target, but we also manually move it
+    // towards the alien to keep up with its flight path, while preserving the user's manual orbital rotation
+    const distanceToTarget = camera.position.distanceTo(alienTargetPos);
+    
+    // Closer rubber-banding: if the ship gets > 25 units away, pull the camera tightly
+    // This keeps the spaceship large and prominent in the frame
+    if (distanceToTarget > 25) {
+        // Calculate vector from target to camera, normalize, and scale to our desired follow distance
+        tempVec.current.subVectors(camera.position, alienTargetPos).normalize().multiplyScalar(25);
+        camera.position.lerp(alienTargetPos.clone().add(tempVec.current), 0.05);
+    }
+  });
+
+  if (!isFollowing) return null;
+
+  return (
+    <OrbitControls
+      ref={controlsRef}
+      enablePan={false}
+      minDistance={10}  // Allow getting very close
+      maxDistance={40}  // Restrict zooming too far out
+      makeDefault
+    />
+  );
+}
+
 export function GravityVisualization({
   repoName,
   roles,
@@ -281,6 +460,7 @@ export function GravityVisualization({
   onAgentClick,
 }: GravityVisualizationProps) {
   const [hoveredAgent, setHoveredAgent] = useState<string | null>(null);
+  const [cameraMode, setCameraMode] = useState<"orbit" | "alien">("orbit");
   const isGlobalPaused = hoveredAgent !== null;
 
   return (
@@ -288,8 +468,25 @@ export function GravityVisualization({
       {/* Background radial gradient to give it depth so it doesn't look completely flat black */}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(0,0,0,0)_0%,rgba(0,0,0,0.8)_100%)] pointer-events-none z-10" />
       
+      {/* Custom Camera Toggle Overlay */}
+      <div className="absolute top-4 left-4 z-50 bg-black/60 p-1.5 rounded-lg border border-primary/20 backdrop-blur-md flex gap-2 pointer-events-auto">
+        <button 
+          onClick={() => setCameraMode("orbit")}
+          className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all shadow-sm ${cameraMode === "orbit" ? "bg-primary text-black" : "text-white/70 hover:bg-white/10"}`}
+        >
+          Sun Orbit View
+        </button>
+        <button 
+          onClick={() => setCameraMode("alien")}
+          className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all shadow-sm ${cameraMode === "alien" ? "bg-primary text-black" : "text-white/70 hover:bg-white/10"}`}
+        >
+          Spaceship Cam
+        </button>
+      </div>
+
       <Canvas dpr={[1, 1.5]} performance={{ min: 0.5 }}>
-        <CameraSetup />
+        {/* Only enable global CameraSetup & OrbitControls when in "orbit" mode */}
+        {cameraMode === "orbit" && <CameraSetup />}
         <color attach="background" args={['#050510']} />
         
         {/* Lighting – ambient + directional three-point setup + Environment for PBR reflections */}
@@ -305,6 +502,10 @@ export function GravityVisualization({
         {/* Core and Planets wrapped in Suspense for useTexture */}
         <Suspense fallback={null}>
           <CoreStar repoName={repoName} />
+          <AlienSpaceship 
+            isFollowing={cameraMode === "alien"} 
+            isGlobalPaused={isGlobalPaused} 
+          />
           
           {roles.map((role, i) => {
             const agentState = agentStates?.find(s => s.agentName === role.name);
@@ -323,17 +524,23 @@ export function GravityVisualization({
           })}
         </Suspense>
         
-        {/* Interaction */}
-        <OrbitControls 
-          enablePan={false}
-          minDistance={30}
-          maxDistance={200}
-          autoRotate={!isGlobalPaused}
-          autoRotateSpeed={0.5}
-          maxPolarAngle={Math.PI / 1.5}
-          minPolarAngle={Math.PI / 6}
-          // The domElement trick below is sometimes needed if orbit controls eat all pointer events, but usually it works fine in Fiber
-        />
+        
+        {/* Interaction - disabled during alien cam so it doesn't fight our useFrame lerping */}
+        {cameraMode === "orbit" && (
+          <OrbitControls 
+            enablePan={false}
+            minDistance={30}
+            maxDistance={200}
+            autoRotate={!isGlobalPaused}
+            autoRotateSpeed={0.5}
+            maxPolarAngle={Math.PI / 1.5}
+            minPolarAngle={Math.PI / 6}
+            makeDefault
+          />
+        )}
+        
+        {/* Dynamic tracking camera that centers on the alien but allows free rotation */}
+        <AlienCameraTracker isFollowing={cameraMode === "alien"} />
         
         {/* Post-processing Glowing Bloom */}
         <EffectComposer>

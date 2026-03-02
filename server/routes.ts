@@ -519,7 +519,7 @@ ${prSummary}
 Total commits fetched: ${commits.length}
 Total PRs fetched: ${prs.length}
 
-You must respond with a fully populated JSON object matching the requested schema.`;
+You must respond with a fully populated JSON object matching the requested schema. Ensure that your descriptions, reasoning, and evidence are highly detailed and comprehensive. Do not give short one-sentence answers; elaborate thoroughly to provide maximum value.`;
 
       const model = getAIModel(env.aiProvider, env.aiApiKey, env.aiModel);
       

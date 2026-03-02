@@ -101,6 +101,7 @@ function getEventIcon(type: string) {
       return <GitBranch className="w-4 h-4" />;
     default:
       return <Activity className="w-4 h-4" />;
+  }
 }
 
 export function formatTimestamp(dateInput: string | Date | number) {
@@ -285,6 +286,7 @@ export default function RepositoryPage() {
         summary: result.summary,
         score: result.gravityScore,
         details: {
+          analysis: result.analysis,
           fullResponse: result.fullResponse,
           commitsAnalyzed: result.commitsAnalyzed,
           prsAnalyzed: result.prsAnalyzed,
